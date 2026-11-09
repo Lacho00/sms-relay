@@ -126,11 +126,12 @@ permanent 400.
 
 ### Dedup
 
-- `normalizeSender(s)` = remove every character that is Unicode whitespace (Kotlin
-  `Char.isWhitespace`, matched in JS with `/[\s\p{Z}]/gu` plus the control characters
-  U+001C–U+001F that Kotlin also counts), then `toUpperCase()`. JS `toUpperCase` does not depend
-  on the locale, which matches `Locale.ROOT`. A test pins the known cases: spaces, tabs, NBSP,
-  `+`, letters, `ß`.
+- `normalizeSender(s)` = remove every character that Kotlin `Char.isWhitespace` counts
+  (JVM: `Character.isWhitespace || Character.isSpaceChar`), then `toUpperCase()`. In JS that is
+  `/[\t\n\v\f\r\u001C-\u001F\p{Zs}\p{Zl}\p{Zp}]/gu`. JS `\s` is not used, because it also
+  matches U+FEFF, which Kotlin keeps. JS `toUpperCase` does not depend on the locale, which
+  matches `Locale.ROOT`. A test pins the known cases: spaces, tabs, NBSP, U+FEFF kept, `+`,
+  letters, `ß` → `SS`.
 - `dedup_key = sha256hex(normalizeSender(sender) + "|" + received_at_ms + "|" + sha256hex(body))`
   **(user)**. This is the app's `localKey`, hashed again. With ISO input, the Worker converts to
   epoch ms first. The same instant in two formats is the same SMS.
@@ -156,6 +157,7 @@ permanent 400.
 | `sim` | integer, null | |
 | `device` | text, null | |
 | `created_at` | integer, not null | epoch ms, server time |
+| `ingest_nonce` | text, not null | random per request; links the deliveries insert to the request that created the row |
 
 Index: `created_at` (retention), and `id` order for listing.
 
@@ -186,7 +188,10 @@ API, so the count they reveal is not sensitive. They make the cursor simple.
 ### Outbox and delivery
 
 - In the same D1 `batch` as the message insert, the Worker inserts one `pending` delivery for
-  each destination that is configured and whose filter matches **(user)**. If the filter does
+  each destination that is configured and whose filter matches **(user)**. The deliveries
+  insert is `INSERT … SELECT id FROM messages WHERE dedup_key = ? AND ingest_nonce = ?`. The
+  nonce matches only when this request created the message. The batch is one transaction, so a
+  message never exists without its deliveries, and a duplicate never adds deliveries. If the filter does
   not match, the Worker inserts no row. **(my call)** Fewer states. The README says that a
   filtered destination does not appear in `GET /v1/messages/:id`.
 - After the 200 response, the Worker runs `ctx.waitUntil(processDeliveries(ids))` for an
