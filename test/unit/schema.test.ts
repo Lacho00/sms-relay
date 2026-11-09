@@ -126,12 +126,14 @@ describe('parseIngest', () => {
       expect(ok({ ...valid, sim: 1 }).sim).toBe(1);
       expect(ok({ ...valid, sim: 0 }).sim).toBe(0);
       expect(ok({ ...valid, sim: 15 }).sim).toBe(15);
+      expect(ok({ ...valid, sim: '1' }).sim).toBe(1);
+      expect(ok({ ...valid, sim: '15' }).sim).toBe(15);
       expect(ok({ ...valid, sim: '' }).sim).toBeNull();
       expect(ok({ ...valid, sim: null }).sim).toBeNull();
       expect(ok(valid).sim).toBeNull();
     });
-    it('rejects 16, -1, 1.5 and strings', () => {
-      for (const sim of [16, -1, 1.5, '1']) expect(fail({ ...valid, sim })).toContain('sim');
+    it('rejects 16, -1, 1.5 and bad strings', () => {
+      for (const sim of [16, -1, 1.5, '16', '-1', '1.5', ' 1', 'a']) expect(fail({ ...valid, sim })).toContain('sim');
     });
   });
 

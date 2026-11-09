@@ -107,7 +107,7 @@ snake_case code.
 | `sender` | string. Trimmed, 1–64 characters. Must not be empty after normalization. **(user)** |
 | `body` | string, 1–10 000 characters. **(my call, see below)** |
 | `received_at` | One of: integer epoch ms; a string of digits (epoch ms); an ISO 8601 string with `Z` or an offset **(user)**. ISO without a zone is rejected, because it is ambiguous. The value must be between 2000-01-01 and now + 24 h. |
-| `sim` | optional: integer 0–15, `null`, or `""` (the app renders an unknown slot as empty). **(my call)** |
+| `sim` | optional: integer 0–15, a digit string of the same (custom templates quote `{sim}`), `null`, or `""` (the app renders an unknown slot as empty). **(my call)** |
 | `device` | optional string, up to 64 characters. **(my call)** |
 
 Unknown keys are dropped. **(my call)** A custom template that adds fields must not be rejected

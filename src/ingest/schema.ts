@@ -17,6 +17,7 @@ export type IngestInput = {
 
 const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
 const DIGITS = /^\d+$/;
+const SIM_DIGITS = /^\d{1,2}$/;
 
 /** Epoch ms from a number, a digit string or an ISO 8601 string with a zone; null otherwise. */
 export function parseReceivedAt(v: unknown): number | null {
@@ -80,10 +81,11 @@ function schemaFor(now: number) {
     }),
     sim: z.unknown().transform((v, ctx): number | null => {
       if (v === undefined || v === null || v === '') return null;
-      if (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 15) return v;
+      const n = typeof v === 'string' && SIM_DIGITS.test(v) ? Number(v) : v;
+      if (typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 15) return n;
       ctx.issues.push({
         code: 'custom',
-        message: 'expected an integer 0-15, null or empty string',
+        message: 'expected an integer 0-15 (or digit string), null or empty string',
         input: undefined,
       });
       return z.NEVER;
