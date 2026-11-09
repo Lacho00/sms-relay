@@ -14,13 +14,28 @@ export type Config = {
   displayTimeZone: string;
   telegramApiBase: string;
 };
-export type ConfigResult = { ok: true; config: Config } | { ok: false; variable: string };
+export type ConfigVariable =
+  | 'INGEST_TOKEN'
+  | 'READ_TOKEN'
+  | 'TELEGRAM_BOT_TOKEN'
+  | 'TELEGRAM_CHAT_ID'
+  | 'TELEGRAM_SENDERS'
+  | 'TELEGRAM_SENDER_REGEX'
+  | 'WEBHOOK_URL'
+  | 'WEBHOOK_SECRET'
+  | 'WEBHOOK_SENDERS'
+  | 'WEBHOOK_SENDER_REGEX'
+  | 'RETENTION_DAYS'
+  | 'MAX_ATTEMPTS'
+  | 'DISPLAY_TIMEZONE'
+  | 'TELEGRAM_API_BASE';
+export type ConfigResult = { ok: true; config: Config } | { ok: false; variable: ConfigVariable };
 
 const MIN_SECRET_LENGTH = 32;
 
 /** Thrown internally so the first invalid variable wins; only the name is kept. */
 class ConfigError extends Error {
-  constructor(readonly variable: string) {
+  constructor(readonly variable: ConfigVariable) {
     super(variable);
   }
 }
@@ -50,7 +65,7 @@ const timeZone = z.string().refine((tz) => {
 });
 
 /** Reads a trimmed string; absent, non-string and empty values mean "not set". */
-function read(env: Record<string, unknown>, name: string): string | undefined {
+function read(env: Record<string, unknown>, name: ConfigVariable): string | undefined {
   const v = env[name];
   if (typeof v !== 'string') return undefined;
   const t = v.trim();
@@ -58,7 +73,7 @@ function read(env: Record<string, unknown>, name: string): string | undefined {
 }
 
 /** Validates `value` with `schema`; throws ConfigError naming `name` on failure. */
-function check<T extends z.ZodType>(schema: T, name: string, value: unknown): z.output<T> {
+function check<T extends z.ZodType>(schema: T, name: ConfigVariable, value: unknown): z.output<T> {
   const r = schema.safeParse(value);
   if (!r.success) throw new ConfigError(name);
   return r.data;
@@ -70,7 +85,7 @@ function parseFilter(env: Record<string, unknown>, prefix: 'TELEGRAM' | 'WEBHOOK
     .split(',')
     .map(normalizeSender)
     .filter((s) => s !== '');
-  const name = `${prefix}_SENDER_REGEX`;
+  const name: ConfigVariable = `${prefix}_SENDER_REGEX`;
   const src = read(env, name);
   let regex: RegExp | null = null;
   if (src !== undefined) {
@@ -84,7 +99,11 @@ function parseFilter(env: Record<string, unknown>, prefix: 'TELEGRAM' | 'WEBHOOK
 }
 
 /** Both set → value pair; neither → null; one → error naming the missing one. */
-function pair(env: Record<string, unknown>, a: string, b: string): [string, string] | null {
+function pair(
+  env: Record<string, unknown>,
+  a: ConfigVariable,
+  b: ConfigVariable,
+): [string, string] | null {
   const va = read(env, a);
   const vb = read(env, b);
   if (va === undefined && vb === undefined) return null;

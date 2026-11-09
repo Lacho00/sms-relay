@@ -1,3 +1,6 @@
+import type { ConfigVariable } from './config';
+import type { ErrorCode } from './http/errors';
+
 export type Destination = 'telegram' | 'webhook';
 
 export type LogEvent =
@@ -16,18 +19,43 @@ export type LogEvent =
  * `error` takes only codes made here (ErrorCode, `http_<n>`, `timeout`, `network`,
  * `redirect`); `variable` takes only config variable names.
  */
+export type LogError =
+  | ErrorCode
+  | `http_${number}`
+  | 'timeout'
+  | 'network'
+  | 'redirect'
+  | 'destination_removed';
+
 export type LogFields = {
   id?: number;
   deliveryId?: number;
   destination?: Destination;
   status?: number;
-  error?: string;
+  error?: LogError;
   attempt?: number;
   count?: number;
   ms?: number;
-  variable?: string;
+  variable?: ConfigVariable;
 };
 
-export function log(event: LogEvent, fields?: LogFields): void {
-  console.log(JSON.stringify({ event, ...fields }));
+const ALLOWED = [
+  'id',
+  'deliveryId',
+  'destination',
+  'status',
+  'error',
+  'attempt',
+  'count',
+  'ms',
+  'variable',
+] as const satisfies readonly (keyof LogFields)[];
+
+/** Copies only whitelisted keys, so extra properties on a wider object are never serialized. */
+export function log(event: LogEvent, fields: LogFields = {}): void {
+  const out: Record<string, unknown> = { event };
+  for (const key of ALLOWED) {
+    if (fields[key] !== undefined) out[key] = fields[key];
+  }
+  console.log(JSON.stringify(out));
 }
