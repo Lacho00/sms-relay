@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { errorBody } from './http/errors';
 
 export type AppDeps = { fetch: typeof fetch; now: () => number };
 
@@ -13,7 +14,7 @@ export function createApp(deps: Partial<AppDeps> = {}): Hono<{ Bindings: Env }> 
 
   app.get('/health', (c) => c.json({ status: 'ok' }));
 
-  app.notFound((c) => c.json({ error: 'not_found', message: 'Not found' }, 404));
+  app.notFound((c) => c.json(errorBody('not_found', 'Not found'), 404));
 
   return app;
 }
