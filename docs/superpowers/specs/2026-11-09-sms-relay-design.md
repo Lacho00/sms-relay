@@ -304,6 +304,7 @@ API, so the count they reveal is not sensitive. They make the cursor simple.
 - The cron deletes messages with `created_at < now − N days`, at most 500 per run. **(my call)**
   This keeps each run short. Deliveries go with the cascade, and the code also deletes them
   explicitly in the same batch, so the result does not depend on the FK setting.
+- Messages with a pending delivery are kept until the delivery ends.
 - **Known effect:** the dedup key is deleted together with the message. If the phone sends an
   SMS again after it was purged, the SMS is stored and forwarded again. The README says so.
 

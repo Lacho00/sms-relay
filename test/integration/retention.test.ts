@@ -31,6 +31,13 @@ async function store(key: string, createdAt: number, destinations: Destination[]
   return r.id;
 }
 
+/** Ends every delivery of a message (as if delivered), so retention may purge it. */
+async function settle(...ids: number[]) {
+  for (const id of ids) {
+    await env.DB.prepare("UPDATE deliveries SET status = 'delivered' WHERE message_id = ?").bind(id).run();
+  }
+}
+
 async function countRows(table: 'messages' | 'deliveries'): Promise<number> {
   const r = await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>();
   return r!.n;
@@ -40,6 +47,7 @@ describe('purgeExpired', () => {
   it('deletes messages older than the retention window, with their deliveries, and keeps newer ones', async () => {
     const old = await store('old', NOW - 31 * DAY);
     const recent = await store('recent', NOW - 29 * DAY);
+    await settle(old);
 
     const count = await purgeExpired(env.DB, 30, NOW);
 
@@ -48,6 +56,27 @@ describe('purgeExpired', () => {
     expect(await getDeliveries(env.DB, old)).toEqual([]);
     expect(await getMessage(env.DB, recent)).not.toBeNull();
     expect((await getDeliveries(env.DB, recent)).length).toBe(2);
+  });
+
+  it('keeps an expired message while any delivery is pending, and purges it once all are delivered or failed', async () => {
+    const pending = await store('pending-kept', NOW - 40 * DAY);
+    const done = await store('done-purged', NOW - 40 * DAY);
+    await env.DB.prepare("UPDATE deliveries SET status = 'delivered' WHERE message_id = ? AND destination = 'telegram'")
+      .bind(pending)
+      .run();
+    await env.DB.prepare("UPDATE deliveries SET status = 'delivered' WHERE message_id = ? AND destination = 'telegram'")
+      .bind(done)
+      .run();
+    await env.DB.prepare("UPDATE deliveries SET status = 'failed' WHERE message_id = ? AND destination = 'webhook'")
+      .bind(done)
+      .run();
+
+    expect(await purgeExpired(env.DB, 30, NOW)).toBe(1);
+
+    expect(await getMessage(env.DB, pending)).not.toBeNull();
+    expect((await getDeliveries(env.DB, pending)).length).toBe(2);
+    expect(await getMessage(env.DB, done)).toBeNull();
+    expect(await getDeliveries(env.DB, done)).toEqual([]);
   });
 
   it('keeps a message created exactly at the cutoff (the comparison is strict)', async () => {
@@ -89,7 +118,7 @@ describe('purgeExpired', () => {
 
   it('stores the same SMS again after it was purged (known limit: the dedup key goes with the message)', async () => {
     const key = 'repeat-after-purge';
-    await store(key, NOW - 40 * DAY);
+    await settle(await store(key, NOW - 40 * DAY));
     expect(await purgeExpired(env.DB, 30, NOW)).toBe(1);
 
     const again = await insertMessage(
@@ -105,7 +134,7 @@ describe('purgeExpired', () => {
 });
 
 describe('createScheduled retention', () => {
-  it('purges before retrying: an expired message with a due delivery is not sent', async () => {
+  it('keeps an expired message with a due delivery and still sends it', async () => {
     const expired = await store('expired-due', NOW - 40 * DAY, ['telegram']);
     const fetchFn = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
     const scheduled = createScheduled({ fetch: fetchFn as unknown as typeof fetch, now: () => NOW });
@@ -115,13 +144,13 @@ describe('createScheduled retention', () => {
     await scheduled(createScheduledController({ scheduledTime: NOW, cron: '* * * * *' }), testEnv(cfg), ctx);
     await waitOnExecutionContext(ctx);
 
-    expect(await getMessage(env.DB, expired)).toBeNull();
-    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await getMessage(env.DB, expired)).not.toBeNull();
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((await getDeliveries(env.DB, expired))[0]).toMatchObject({ status: 'delivered' });
   });
 
   it('logs retention.purged with the count when something was purged', async () => {
-    await store('log-a', NOW - 40 * DAY);
-    await store('log-b', NOW - 41 * DAY);
+    await settle(await store('log-a', NOW - 40 * DAY), await store('log-b', NOW - 41 * DAY));
     const spy = vi.spyOn(console, 'log');
     const scheduled = createScheduled({ fetch: vi.fn() as unknown as typeof fetch, now: () => NOW });
     const ctx = createExecutionContext();

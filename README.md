@@ -271,7 +271,7 @@ is always kept in D1.
 ## Retention
 
 The cron deletes messages (and their deliveries) older than `RETENTION_DAYS`, at most 500 per run.
-`RETENTION_DAYS=0` keeps everything.
+`RETENTION_DAYS=0` keeps everything. Messages with a pending delivery are kept until the delivery ends.
 
 ## Known limits
 
