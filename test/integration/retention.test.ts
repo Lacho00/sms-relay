@@ -148,3 +148,33 @@ describe('createScheduled retention', () => {
     expect(events).not.toContain('retention.purged');
   });
 });
+
+describe('createScheduled when the purge fails', () => {
+  it('logs retention.failed and still retries the due delivery', async () => {
+    const m = `fail-purge-${crypto.randomUUID()}`;
+    const id = await store(m, NOW, ['telegram']);
+    // Every batch rejects, so purgeExpired throws; other calls go to the real DB.
+    const failingDb = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === 'batch') return () => Promise.reject(new Error('purge boom'));
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    const fetchFn = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    const spy = vi.spyOn(console, 'log');
+    const scheduled = createScheduled({ fetch: fetchFn as unknown as typeof fetch, now: () => NOW });
+    const ctx = createExecutionContext();
+    const cfg = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_CHAT_ID: CHAT_ID, TELEGRAM_API_BASE: TG_BASE, DB: failingDb };
+
+    await scheduled(createScheduledController({ scheduledTime: NOW, cron: '* * * * *' }), testEnv(cfg), ctx);
+    await waitOnExecutionContext(ctx);
+    const lines = spy.mock.calls.map((c) => String(c[0]));
+    spy.mockRestore();
+
+    expect(lines.map((l) => (JSON.parse(l) as { event: string }).event)).toContain('retention.failed');
+    expect(lines.join('\n')).not.toContain('purge boom');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((await getDeliveries(env.DB, id))[0]).toMatchObject({ status: 'delivered' });
+  });
+});

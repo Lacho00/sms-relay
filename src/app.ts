@@ -67,8 +67,13 @@ export function createScheduled(
   return async (_controller, env, ctx) => {
     ctx.waitUntil(
       withOutbox(env, runtime, async (d) => {
-        const count = await purgeExpired(d.db, d.config.retentionDays, d.now());
-        if (count > 0) log('retention.purged', { count });
+        // A failed purge must not stop the retries. The error itself is not logged: it could carry data.
+        try {
+          const count = await purgeExpired(d.db, d.config.retentionDays, d.now());
+          if (count > 0) log('retention.purged', { count });
+        } catch {
+          log('retention.failed', { error: 'internal' });
+        }
         await retryDue(d);
       }).catch(() => {
         log('internal.error', { error: 'internal' });

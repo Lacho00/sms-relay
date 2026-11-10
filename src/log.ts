@@ -11,6 +11,7 @@ export type LogEvent =
   | 'delivery.retry'
   | 'delivery.failed'
   | 'retention.purged'
+  | 'retention.failed'
   | 'config.invalid'
   | 'internal.error';
 
