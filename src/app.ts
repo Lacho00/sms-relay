@@ -3,6 +3,7 @@ import { parseConfig } from './config';
 import { errorBody } from './http/errors';
 import { handleIngest } from './ingest/handler';
 import { log } from './log';
+import { handleDetail, handleList } from './read/handler';
 import { processDeliveries, retryDue, type OutboxDeps } from './outbox/process';
 
 export type Runtime = {
@@ -42,6 +43,9 @@ export function createApp(deps: Partial<AppDeps> = {}): Hono<{ Bindings: Env }> 
   app.get('/health', (c) => c.json({ status: 'ok' }));
 
   app.post('/v1/sms', (c) => handleIngest(c, resolved));
+
+  app.get('/v1/messages', handleList);
+  app.get('/v1/messages/:id', handleDetail);
 
   app.notFound((c) => c.json(errorBody('not_found', 'Not found'), 404));
 

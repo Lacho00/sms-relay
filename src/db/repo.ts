@@ -75,12 +75,7 @@ type MessageSql = {
   created_at: number;
 };
 
-export async function getMessage(db: D1Database, id: number): Promise<MessageRow | null> {
-  const r = await db
-    .prepare('SELECT id, sender, body, received_at, sim, device, created_at FROM messages WHERE id = ?')
-    .bind(id)
-    .first<MessageSql>();
-  if (!r) return null;
+function toMessageRow(r: MessageSql): MessageRow {
   return {
     id: r.id,
     sender: r.sender,
@@ -90,6 +85,14 @@ export async function getMessage(db: D1Database, id: number): Promise<MessageRow
     device: r.device,
     createdAt: r.created_at,
   };
+}
+
+export async function getMessage(db: D1Database, id: number): Promise<MessageRow | null> {
+  const r = await db
+    .prepare('SELECT id, sender, body, received_at, sim, device, created_at FROM messages WHERE id = ?')
+    .bind(id)
+    .first<MessageSql>();
+  return r ? toMessageRow(r) : null;
 }
 
 type DeliverySql = {
@@ -222,4 +225,36 @@ export async function markFailed(
     .bind(attempts, error, status, now, id, lease)
     .run();
   return r.meta.changes > 0;
+}
+
+/**
+ * One page of messages, newest first, with the delivery summaries of that page loaded by a
+ * single `IN (...)` query. `beforeId` is exclusive; null starts from the newest.
+ */
+export async function listMessages(
+  db: D1Database,
+  beforeId: number | null,
+  limit: number,
+): Promise<{ rows: MessageRow[]; deliveries: Map<number, { destination: Destination; status: DeliveryStatus }[]> }> {
+  const { results } = await db
+    .prepare(
+      `SELECT id, sender, body, received_at, sim, device, created_at FROM messages
+       WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2`,
+    )
+    .bind(beforeId, limit)
+    .all<MessageSql>();
+  const rows = results.map(toMessageRow);
+  const deliveries = new Map<number, { destination: Destination; status: DeliveryStatus }[]>();
+  if (rows.length === 0) return { rows, deliveries };
+  const marks = rows.map(() => '?').join(', ');
+  const found = await db
+    .prepare(`SELECT message_id, destination, status FROM deliveries WHERE message_id IN (${marks}) ORDER BY id`)
+    .bind(...rows.map((r) => r.id))
+    .all<{ message_id: number; destination: Destination; status: DeliveryStatus }>();
+  for (const d of found.results) {
+    const list = deliveries.get(d.message_id) ?? [];
+    list.push({ destination: d.destination, status: d.status });
+    deliveries.set(d.message_id, list);
+  }
+  return { rows, deliveries };
 }
