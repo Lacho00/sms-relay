@@ -107,12 +107,8 @@ type DeliverySql = {
   updated_at: number;
 };
 
-export async function getDeliveries(db: D1Database, messageId: number): Promise<DeliveryRow[]> {
-  const { results } = await db
-    .prepare('SELECT * FROM deliveries WHERE message_id = ? ORDER BY id')
-    .bind(messageId)
-    .all<DeliverySql>();
-  return results.map((r) => ({
+function toDeliveryRow(r: DeliverySql): DeliveryRow {
+  return {
     id: r.id,
     messageId: r.message_id,
     destination: r.destination,
@@ -125,5 +121,94 @@ export async function getDeliveries(db: D1Database, messageId: number): Promise<
     deliveredAt: r.delivered_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
-  }));
+  };
+}
+
+export async function getDeliveries(db: D1Database, messageId: number): Promise<DeliveryRow[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM deliveries WHERE message_id = ? ORDER BY id')
+    .bind(messageId)
+    .all<DeliverySql>();
+  return results.map(toDeliveryRow);
+}
+
+export const LEASE_MS = 60_000;
+
+/** Takes the lease on a due pending delivery; null when another worker holds it or it is not due. */
+export async function claimDelivery(db: D1Database, id: number, now: number): Promise<DeliveryRow | null> {
+  const r = await db
+    .prepare(
+      `UPDATE deliveries SET locked_until = ?
+       WHERE id = ? AND status = 'pending' AND next_attempt_at <= ? AND (locked_until IS NULL OR locked_until < ?)
+       RETURNING *`,
+    )
+    .bind(now + LEASE_MS, id, now, now)
+    .first<DeliverySql>();
+  return r ? toDeliveryRow(r) : null;
+}
+
+export async function dueDeliveryIds(db: D1Database, now: number, limit: number): Promise<number[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT id FROM deliveries
+       WHERE status = 'pending' AND next_attempt_at <= ? AND (locked_until IS NULL OR locked_until < ?)
+       ORDER BY next_attempt_at, id LIMIT ?`,
+    )
+    .bind(now, now, limit)
+    .all<{ id: number }>();
+  return results.map((r) => r.id);
+}
+
+export async function markDelivered(
+  db: D1Database,
+  id: number,
+  attempts: number,
+  status: number,
+  now: number,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE deliveries SET status = 'delivered', attempts = ?, last_status_code = ?, last_error = NULL,
+         delivered_at = ?, locked_until = NULL, updated_at = ?
+       WHERE id = ? AND status = 'pending'`,
+    )
+    .bind(attempts, status, now, now, id)
+    .run();
+}
+
+export async function markRetry(
+  db: D1Database,
+  id: number,
+  attempts: number,
+  nextAt: number,
+  error: string,
+  status: number | null,
+  now: number,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE deliveries SET attempts = ?, next_attempt_at = ?, last_error = ?, last_status_code = ?,
+         locked_until = NULL, updated_at = ?
+       WHERE id = ? AND status = 'pending'`,
+    )
+    .bind(attempts, nextAt, error, status, now, id)
+    .run();
+}
+
+export async function markFailed(
+  db: D1Database,
+  id: number,
+  attempts: number,
+  error: string,
+  status: number | null,
+  now: number,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE deliveries SET status = 'failed', attempts = ?, last_error = ?, last_status_code = ?,
+         locked_until = NULL, updated_at = ?
+       WHERE id = ? AND status = 'pending'`,
+    )
+    .bind(attempts, error, status, now, id)
+    .run();
 }
