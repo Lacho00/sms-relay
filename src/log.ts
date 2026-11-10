@@ -17,7 +17,7 @@ export type LogEvent =
 /**
  * Closed set of safe fields: no free text, so a sender or body cannot be logged.
  * `error` takes only codes made here (ErrorCode, `http_<n>`, `timeout`, `network`,
- * `redirect`); `variable` takes only config variable names.
+ * `redirect`, `destination_removed`, `message_missing`); `variable` takes only config variable names.
  */
 export type LogError =
   | ErrorCode
@@ -25,7 +25,8 @@ export type LogError =
   | 'timeout'
   | 'network'
   | 'redirect'
-  | 'destination_removed';
+  | 'destination_removed'
+  | 'message_missing';
 
 export type LogFields = {
   id?: number;

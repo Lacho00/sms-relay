@@ -1,21 +1,40 @@
 import { Hono } from 'hono';
+import { parseConfig } from './config';
 import { errorBody } from './http/errors';
 import { handleIngest } from './ingest/handler';
 import { log } from './log';
+import { processDeliveries, retryDue, type OutboxDeps } from './outbox/process';
 
-export type AppDeps = {
+export type Runtime = {
   fetch: typeof fetch;
   now: () => number;
+};
+
+export type AppDeps = Runtime & {
   /** Runs after a new message is stored, through `waitUntil`, with its new delivery ids. */
   onStored: (env: Env, ids: number[]) => Promise<void>;
 };
 
+function resolveRuntime(deps: Partial<Runtime>): Runtime {
+  return { fetch: deps.fetch ?? globalThis.fetch.bind(globalThis), now: deps.now ?? Date.now };
+}
+
+/** Parses the config from env and runs `job` with outbox deps. Invalid config: logs and runs nothing. */
+async function withOutbox(env: Env, runtime: Runtime, job: (deps: OutboxDeps) => Promise<unknown>): Promise<void> {
+  const parsed = parseConfig(env as unknown as Record<string, unknown>);
+  if (!parsed.ok) {
+    log('config.invalid', { variable: parsed.variable });
+    return;
+  }
+  await job({ db: env.DB, config: parsed.config, fetch: runtime.fetch, now: runtime.now });
+}
+
 export function createApp(deps: Partial<AppDeps> = {}): Hono<{ Bindings: Env }> {
+  const runtime = resolveRuntime(deps);
   const resolved: AppDeps = {
-    fetch: globalThis.fetch.bind(globalThis),
-    now: Date.now,
-    onStored: async () => {},
-    ...deps,
+    ...runtime,
+    onStored: (env, ids) => withOutbox(env, runtime, (d) => processDeliveries(d, ids)),
+    ...(deps.onStored ? { onStored: deps.onStored } : {}),
   };
 
   const app = new Hono<{ Bindings: Env }>();
@@ -33,4 +52,18 @@ export function createApp(deps: Partial<AppDeps> = {}): Hono<{ Bindings: Env }> 
   });
 
   return app;
+}
+
+/** The cron handler: retries due deliveries through `waitUntil`. */
+export function createScheduled(
+  deps: Partial<Runtime> = {},
+): (controller: ScheduledController, env: Env, ctx: ExecutionContext) => Promise<void> {
+  const runtime = resolveRuntime(deps);
+  return async (_controller, env, ctx) => {
+    ctx.waitUntil(
+      withOutbox(env, runtime, (d) => retryDue(d)).catch(() => {
+        log('internal.error', { error: 'internal' });
+      }),
+    );
+  };
 }
