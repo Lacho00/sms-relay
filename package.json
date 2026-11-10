@@ -15,7 +15,7 @@
     "verify": "npm run typecheck && npm run coverage",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
-    "cf-typegen": "wrangler types",
+    "cf-typegen": "wrangler types --env-file=/dev/null",
     "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy"
   },
   "dependencies": {
