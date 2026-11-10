@@ -5,6 +5,7 @@ import { handleIngest } from './ingest/handler';
 import { log } from './log';
 import { handleDetail, handleList } from './read/handler';
 import { processDeliveries, retryDue, type OutboxDeps } from './outbox/process';
+import { purgeExpired } from './retention';
 
 export type Runtime = {
   fetch: typeof fetch;
@@ -58,14 +59,18 @@ export function createApp(deps: Partial<AppDeps> = {}): Hono<{ Bindings: Env }> 
   return app;
 }
 
-/** The cron handler: retries due deliveries through `waitUntil`. */
+/** The cron handler: purges expired messages, then retries due deliveries, through `waitUntil`. */
 export function createScheduled(
   deps: Partial<Runtime> = {},
 ): (controller: ScheduledController, env: Env, ctx: ExecutionContext) => Promise<void> {
   const runtime = resolveRuntime(deps);
   return async (_controller, env, ctx) => {
     ctx.waitUntil(
-      withOutbox(env, runtime, (d) => retryDue(d)).catch(() => {
+      withOutbox(env, runtime, async (d) => {
+        const count = await purgeExpired(d.db, d.config.retentionDays, d.now());
+        if (count > 0) log('retention.purged', { count });
+        await retryDue(d);
+      }).catch(() => {
         log('internal.error', { error: 'internal' });
       }),
     );
