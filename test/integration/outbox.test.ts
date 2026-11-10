@@ -70,6 +70,11 @@ async function ingest(opts: {
   return { status: res.status, json: (await res.json()) as { status: string; id: number } };
 }
 
+const rowById = async (id: number) => {
+  const r = await env.DB.prepare('SELECT message_id FROM deliveries WHERE id = ?').bind(id).first<{ message_id: number }>();
+  return (await getDeliveries(env.DB, r!.message_id)).find((d) => d.id === id)!;
+};
+
 const byDest = (rows: DeliveryRow[], d: 'telegram' | 'webhook') => rows.find((r) => r.destination === d)!;
 
 const deps = (config: Config, fetchFn: typeof fetch, at: number): OutboxDeps => ({
@@ -323,9 +328,82 @@ describe('processDeliveries', () => {
     const msg = await env.DB.prepare('SELECT message_id FROM deliveries WHERE id = ?').bind(ids[0]!).first<{ message_id: number }>();
     const rows = await getDeliveries(env.DB, msg!.message_id);
     const tg = byDest(rows, 'telegram');
-    expect(tg).toMatchObject({ status: 'pending', attempts: 0, lockedUntil: now + 60_000 });
+    expect(tg).toMatchObject({ status: 'pending', attempts: 1, lockedUntil: now + 60_000 });
     expect(byDest(rows, 'webhook')).toMatchObject({ status: 'delivered' });
     expect(lines).toContainEqual({ event: 'internal.error', deliveryId: tg.id, error: 'internal' });
+  });
+
+  const crash: Reply = () =>
+    ({
+      status: 200,
+      text: async () => '',
+      headers: {
+        get: () => {
+          throw new Error('crash after claim');
+        },
+      },
+    }) as unknown as Response;
+
+  it('a crash after the claim still uses an attempt; the retry after lease expiry is attempt 2', async () => {
+    const now = 7_610_000_000_000;
+    const m = marker();
+    const [id] = await seed(m, ['telegram'], now);
+    const cfg = configFor(TG_ENV);
+    await processDeliveries(deps(cfg, fakeFetch(m, crash).fn, now), [id!]);
+    expect(await rowById(id!)).toMatchObject({ status: 'pending', attempts: 1, lockedUntil: now + 60_000 });
+    const good = fakeFetch(m, ok);
+    await processDeliveries(deps(cfg, good.fn, now + 60_001), [id!]);
+    expect(good.mine()).toHaveLength(1);
+    expect(await rowById(id!)).toMatchObject({ status: 'delivered', attempts: 2, lockedUntil: null });
+  });
+
+  it('repeated crashes end in attempts_exhausted without an extra request', async () => {
+    const spy = vi.spyOn(console, 'log');
+    const now = 7_620_000_000_000;
+    const m = marker();
+    const [id] = await seed(m, ['telegram'], now);
+    const cfg = configFor({ ...TG_ENV, MAX_ATTEMPTS: '2' });
+    const f = fakeFetch(m, crash);
+    await processDeliveries(deps(cfg, f.fn, now), [id!]);
+    await processDeliveries(deps(cfg, f.fn, now + 60_001), [id!]);
+    expect(f.mine()).toHaveLength(2);
+    expect(await rowById(id!)).toMatchObject({ status: 'pending', attempts: 2 });
+    await processDeliveries(deps(cfg, f.fn, now + 120_002), [id!]);
+    const lines = spy.mock.calls.map((c) => JSON.parse(String(c[0])) as Record<string, unknown>);
+    spy.mockRestore();
+    expect(f.mine()).toHaveLength(2);
+    expect(await rowById(id!)).toMatchObject({
+      status: 'failed',
+      attempts: 3,
+      lastError: 'attempts_exhausted',
+      lastStatusCode: null,
+      lockedUntil: null,
+    });
+    expect(lines).toContainEqual({
+      event: 'delivery.failed',
+      deliveryId: id,
+      destination: 'telegram',
+      attempt: 3,
+      error: 'attempts_exhausted',
+    });
+  });
+
+  it('a lost lease during the send logs lease_lost and does not overwrite the row', async () => {
+    const spy = vi.spyOn(console, 'log');
+    const now = 7_630_000_000_000;
+    const m = marker();
+    const [id] = await seed(m, ['webhook'], now);
+    const f = fakeFetch(m, async () => {
+      // Another worker took the row after this one's lease expired.
+      await env.DB.prepare('UPDATE deliveries SET locked_until = ? WHERE id = ?').bind(now + 999_999, id!).run();
+      return new Response('', { status: 200 });
+    });
+    await processDeliveries(deps(configFor(HOOK_ENV), f.fn, now), [id!]);
+    const lines = spy.mock.calls.map((c) => JSON.parse(String(c[0])) as Record<string, unknown>);
+    spy.mockRestore();
+    expect(await rowById(id!)).toMatchObject({ status: 'pending', attempts: 1, lockedUntil: now + 999_999 });
+    expect(lines).toContainEqual({ event: 'internal.error', deliveryId: id, error: 'lease_lost' });
+    expect(lines.filter((l) => String(l.event).startsWith('delivery.'))).toEqual([]);
   });
 
   it('marks a delivery failed with message_missing when its message is gone', async () => {

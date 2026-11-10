@@ -134,11 +134,15 @@ export async function getDeliveries(db: D1Database, messageId: number): Promise<
 
 export const LEASE_MS = 60_000;
 
-/** Takes the lease on a due pending delivery; null when another worker holds it or it is not due. */
+/**
+ * Takes the lease on a due pending delivery and counts the attempt in the same statement, so a
+ * worker that dies after the claim still uses an attempt. The returned `lockedUntil` is the lease
+ * token the mark* functions require. Null when another worker holds the row or it is not due.
+ */
 export async function claimDelivery(db: D1Database, id: number, now: number): Promise<DeliveryRow | null> {
   const r = await db
     .prepare(
-      `UPDATE deliveries SET locked_until = ?
+      `UPDATE deliveries SET locked_until = ?, attempts = attempts + 1
        WHERE id = ? AND status = 'pending' AND next_attempt_at <= ? AND (locked_until IS NULL OR locked_until < ?)
        RETURNING *`,
     )
@@ -159,56 +163,63 @@ export async function dueDeliveryIds(db: D1Database, now: number, limit: number)
   return results.map((r) => r.id);
 }
 
+/** The mark* functions only change a pending row still held under `lease`; they return whether it changed. */
 export async function markDelivered(
   db: D1Database,
   id: number,
+  lease: number,
   attempts: number,
   status: number,
   now: number,
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const r = await db
     .prepare(
       `UPDATE deliveries SET status = 'delivered', attempts = ?, last_status_code = ?, last_error = NULL,
          delivered_at = ?, locked_until = NULL, updated_at = ?
-       WHERE id = ? AND status = 'pending'`,
+       WHERE id = ? AND status = 'pending' AND locked_until = ?`,
     )
-    .bind(attempts, status, now, now, id)
+    .bind(attempts, status, now, now, id, lease)
     .run();
+  return r.meta.changes > 0;
 }
 
 export async function markRetry(
   db: D1Database,
   id: number,
+  lease: number,
   attempts: number,
   nextAt: number,
   error: string,
   status: number | null,
   now: number,
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const r = await db
     .prepare(
       `UPDATE deliveries SET attempts = ?, next_attempt_at = ?, last_error = ?, last_status_code = ?,
          locked_until = NULL, updated_at = ?
-       WHERE id = ? AND status = 'pending'`,
+       WHERE id = ? AND status = 'pending' AND locked_until = ?`,
     )
-    .bind(attempts, nextAt, error, status, now, id)
+    .bind(attempts, nextAt, error, status, now, id, lease)
     .run();
+  return r.meta.changes > 0;
 }
 
 export async function markFailed(
   db: D1Database,
   id: number,
+  lease: number,
   attempts: number,
   error: string,
   status: number | null,
   now: number,
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const r = await db
     .prepare(
       `UPDATE deliveries SET status = 'failed', attempts = ?, last_error = ?, last_status_code = ?,
          locked_until = NULL, updated_at = ?
-       WHERE id = ? AND status = 'pending'`,
+       WHERE id = ? AND status = 'pending' AND locked_until = ?`,
     )
-    .bind(attempts, error, status, now, id)
+    .bind(attempts, error, status, now, id, lease)
     .run();
+  return r.meta.changes > 0;
 }

@@ -36,6 +36,14 @@ describe('claimDelivery', () => {
     expect(LEASE_MS).toBe(60_000);
   });
 
+  it('counts the attempt at claim time', async () => {
+    const [id] = await seed(['telegram'], 1000);
+    expect((await claimDelivery(env.DB, id!, 1000))!.attempts).toBe(1);
+    const again = await claimDelivery(env.DB, id!, 1000 + 60_001);
+    expect(again!.attempts).toBe(2);
+    expect((await row(id!)).attempts).toBe(2);
+  });
+
   it('refuses a second claim while leased, then allows it after expiry', async () => {
     const [id] = await seed(['telegram'], 1000);
     expect(await claimDelivery(env.DB, id!, 1000)).not.toBeNull();
@@ -52,7 +60,8 @@ describe('claimDelivery', () => {
 
   it('refuses a delivered row', async () => {
     const [id] = await seed(['telegram'], 1000);
-    await markDelivered(env.DB, id!, 1, 200, 1000);
+    const c = await claimDelivery(env.DB, id!, 1000);
+    expect(await markDelivered(env.DB, id!, c!.lockedUntil!, 1, 200, 1000)).toBe(true);
     expect(await claimDelivery(env.DB, id!, 2000)).toBeNull();
   });
 });
@@ -78,8 +87,8 @@ describe('dueDeliveryIds', () => {
 describe('mark*', () => {
   it('markDelivered sets the terminal state', async () => {
     const [id] = await seed(['telegram'], 1000);
-    await claimDelivery(env.DB, id!, 1000);
-    await markDelivered(env.DB, id!, 2, 200, 3000);
+    const c = await claimDelivery(env.DB, id!, 1000);
+    expect(await markDelivered(env.DB, id!, c!.lockedUntil!, 2, 200, 3000)).toBe(true);
     expect(await row(id!)).toMatchObject({
       status: 'delivered',
       attempts: 2,
@@ -93,8 +102,8 @@ describe('mark*', () => {
 
   it('markRetry keeps the row pending and schedules the next attempt', async () => {
     const [id] = await seed(['telegram'], 1000);
-    await claimDelivery(env.DB, id!, 1000);
-    await markRetry(env.DB, id!, 1, 9000, 'http_502', 502, 3000);
+    const c = await claimDelivery(env.DB, id!, 1000);
+    expect(await markRetry(env.DB, id!, c!.lockedUntil!, 1, 9000, 'http_502', 502, 3000)).toBe(true);
     expect(await row(id!)).toMatchObject({
       status: 'pending',
       attempts: 1,
@@ -108,8 +117,8 @@ describe('mark*', () => {
 
   it('markFailed sets the failed state', async () => {
     const [id] = await seed(['telegram'], 1000);
-    await claimDelivery(env.DB, id!, 1000);
-    await markFailed(env.DB, id!, 3, 'timeout', null, 3000);
+    const c = await claimDelivery(env.DB, id!, 1000);
+    expect(await markFailed(env.DB, id!, c!.lockedUntil!, 3, 'timeout', null, 3000)).toBe(true);
     expect(await row(id!)).toMatchObject({
       status: 'failed',
       attempts: 3,
@@ -122,9 +131,24 @@ describe('mark*', () => {
 
   it('never rewrites a terminal row', async () => {
     const [id] = await seed(['telegram'], 1000);
-    await markDelivered(env.DB, id!, 1, 200, 2000);
-    await markRetry(env.DB, id!, 5, 9999, 'http_500', 500, 3000);
-    await markFailed(env.DB, id!, 6, 'x', 500, 3000);
+    const c = await claimDelivery(env.DB, id!, 1000);
+    const lease = c!.lockedUntil!;
+    await markDelivered(env.DB, id!, lease, 1, 200, 2000);
+    expect(await markRetry(env.DB, id!, lease, 5, 9999, 'http_500', 500, 3000)).toBe(false);
+    expect(await markFailed(env.DB, id!, lease, 6, 'x', 500, 3000)).toBe(false);
     expect(await row(id!)).toMatchObject({ status: 'delivered', attempts: 1, updatedAt: 2000, lastError: null });
+  });
+
+  it('a stale lease token changes nothing and returns false', async () => {
+    const [id] = await seed(['telegram'], 1000);
+    const stale = (await claimDelivery(env.DB, id!, 1000))!.lockedUntil!;
+    // The lease expires and another worker claims the row.
+    const fresh = (await claimDelivery(env.DB, id!, 1000 + 60_001))!;
+    expect(await markDelivered(env.DB, id!, stale, 1, 200, 70_000)).toBe(false);
+    expect(await markRetry(env.DB, id!, stale, 1, 99_000, 'http_502', 502, 70_000)).toBe(false);
+    expect(await markFailed(env.DB, id!, stale, 1, 'http_400', 400, 70_000)).toBe(false);
+    expect(await markFailed(env.DB, id!, stale + 1, 1, 'http_400', 400, 70_000)).toBe(false);
+    expect(await row(id!)).toMatchObject({ status: 'pending', attempts: 2, lockedUntil: fresh.lockedUntil, lastError: null });
+    expect(await markDelivered(env.DB, id!, fresh.lockedUntil!, 2, 200, 70_000)).toBe(true);
   });
 });

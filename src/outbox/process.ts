@@ -30,19 +30,31 @@ function send(deps: OutboxDeps, row: DeliveryRow, m: MessageRow, now: number): P
   return sendWebhook(deps.fetch, config.webhook, m, row.id, now);
 }
 
-/** claim → message → send → classify → mark. Logs one delivery.* event when it attempts. */
+/**
+ * claim (counts the attempt) → message → send → classify → mark. Every mark carries the lease
+ * token from the claim; when the lease was lost meanwhile, nothing is written and no delivery.*
+ * event is logged.
+ */
 async function processOne(deps: OutboxDeps, id: number): Promise<void> {
   const { db } = deps;
   const claimedAt = deps.now();
   const row = await claimDelivery(db, id, claimedAt);
   if (!row) return;
-  const attempt = row.attempts + 1;
+  const attempt = row.attempts;
+  const lease = row.lockedUntil!;
   const base = { deliveryId: id, destination: row.destination, attempt };
 
-  const fail = async (error: LogError, status: number | null, now: number, ms?: number) => {
-    await markFailed(db, id, attempt, error, status, now);
-    log('delivery.failed', { ...base, error, status: status ?? undefined, ms });
+  const settled = (changed: boolean, event: () => void) => {
+    if (changed) event();
+    else log('internal.error', { deliveryId: id, error: 'lease_lost' });
   };
+  const fail = async (error: LogError, status: number | null, now: number, ms?: number) => {
+    const changed = await markFailed(db, id, lease, attempt, error, status, now);
+    settled(changed, () => log('delivery.failed', { ...base, error, status: status ?? undefined, ms }));
+  };
+
+  // Earlier claims used every attempt without settling the row (crashed workers): stop here.
+  if (attempt > deps.config.maxAttempts) return fail('attempts_exhausted', null, claimedAt);
 
   const m = await getMessage(db, row.messageId);
   if (!m) return fail('message_missing', null, claimedAt);
@@ -56,16 +68,16 @@ async function processOne(deps: OutboxDeps, id: number): Promise<void> {
   const verdict = classify(result);
 
   if (verdict === 'delivered') {
-    await markDelivered(db, id, attempt, status!, now);
-    log('delivery.delivered', { ...base, status: status!, ms });
+    const changed = await markDelivered(db, id, lease, attempt, status!, now);
+    settled(changed, () => log('delivery.delivered', { ...base, status: status!, ms }));
     return;
   }
   // Non-null for every non-2xx result.
   const error = errorCode(result) as LogError;
   if (verdict === 'failed' || attempt >= deps.config.maxAttempts) return fail(error, status, now, ms);
   const retryAfterMs = result.kind === 'response' ? result.retryAfterMs : null;
-  await markRetry(db, id, attempt, now + nextDelayMs(attempt, retryAfterMs), error, status, now);
-  log('delivery.retry', { ...base, error, status: status ?? undefined, ms });
+  const changed = await markRetry(db, id, lease, attempt, now + nextDelayMs(attempt, retryAfterMs), error, status, now);
+  settled(changed, () => log('delivery.retry', { ...base, error, status: status ?? undefined, ms }));
 }
 
 /**
