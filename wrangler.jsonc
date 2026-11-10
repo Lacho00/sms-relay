@@ -8,7 +8,7 @@
     {
       "binding": "DB",
       "database_name": "sms-relay",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "4c690585-a465-416e-9d17-4bb6e6290bce",
       "migrations_dir": "drizzle"
     }
   ],
