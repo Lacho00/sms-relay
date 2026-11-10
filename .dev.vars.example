@@ -1,0 +1,37 @@
+# Copy to .dev.vars for local development (`wrangler dev`). Never commit .dev.vars.
+# For a deployed Worker, set secrets with `wrangler secret put <NAME>` and vars in wrangler.jsonc.
+# Lines starting with "#" are optional: remove the "#" and replace the placeholder to turn them on.
+
+# Required. Bearer token the Android app sends to POST /v1/sms. At least 32 characters.
+INGEST_TOKEN=change-me-ingest-token-at-least-32-characters
+
+# Required for the read API. At least 32 characters and different from INGEST_TOKEN.
+READ_TOKEN=change-me-read-token-at-least-32-characters-different
+
+# Telegram is on when BOT_TOKEN and CHAT_ID are both set. Setting only one is a config error.
+# TELEGRAM_BOT_TOKEN=change-me-telegram-bot-token
+# Numeric chat id, or @channelname.
+# TELEGRAM_CHAT_ID=change-me-telegram-chat-id
+# Comma-separated senders allowed to reach Telegram (exact match, whitespace and case ignored).
+# TELEGRAM_SENDERS=change-me-sender-a,change-me-sender-b
+# JS regex (flag i) tested on the sender. A sender passes if it is in the list OR matches the regex.
+# TELEGRAM_SENDER_REGEX=change-me-regex
+
+# The webhook is on when URL and SECRET are both set. Setting only one is a config error.
+# https only, except http://localhost and http://127.0.0.1 for local development.
+# WEBHOOK_URL=https://change-me.example/hook
+# HMAC-SHA256 signing secret. At least 32 characters.
+# WEBHOOK_SECRET=change-me-webhook-secret-at-least-32-characters
+# Comma-separated senders allowed to reach the webhook.
+# WEBHOOK_SENDERS=change-me-sender-a,change-me-sender-b
+# JS regex (flag i) for the webhook, same rules as TELEGRAM_SENDER_REGEX.
+# WEBHOOK_SENDER_REGEX=change-me-regex
+
+# Days to keep messages before the cron purges them. Integer >= 0; 0 keeps everything. Default 30.
+# RETENTION_DAYS=30
+# Delivery attempts per destination before it is marked failed. Integer 1-50. Default 10.
+# MAX_ATTEMPTS=10
+# IANA time zone used for the timestamp in Telegram messages. Default UTC.
+# DISPLAY_TIMEZONE=UTC
+# Base URL of the Telegram Bot API. Only change it for tests. Default https://api.telegram.org.
+# TELEGRAM_API_BASE=https://api.telegram.org
