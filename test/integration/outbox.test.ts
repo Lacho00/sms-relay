@@ -493,3 +493,134 @@ describe('scheduled', () => {
     expect(f.fn).not.toHaveBeenCalled();
   });
 });
+
+describe('telegram parts', () => {
+  const seed = async (body: string, dests: ('telegram' | 'webhook')[], at: number) =>
+    (
+      await insertMessage(
+        env.DB,
+        { sender: 'ACME', body, receivedAt: at - 1000, sim: null, device: null },
+        `k-${crypto.randomUUID()}`,
+        dests,
+        at,
+      )
+    ).deliveryIds;
+
+  // Every part carries the marker: the body is the marker repeated, split on spaces.
+  const longBody = (m: string) => Array.from({ length: 220 }, () => m).join(' ');
+  const partOf = (s: Seen) => {
+    const text = (JSON.parse(s.body) as { text: string }).text;
+    return /^\((\d+\/\d+)\)\n/.exec(text)?.[1] ?? 'single';
+  };
+  const tgParts = (seen: Seen[]) => seen.filter((s) => s.url.startsWith(TG_BASE)).map(partOf);
+
+  it('delivers a 3-part message in one attempt', async () => {
+    const now = 8_000_000_000_000;
+    const m = marker();
+    const [id] = await seed(longBody(m), ['telegram'], now);
+    const f = fakeFetch(m, ok);
+    await processDeliveries(deps(configFor(TG_ENV), f.fn, now), [id!]);
+    expect(tgParts(f.mine())).toEqual(['1/3', '2/3', '3/3']);
+    expect(await rowById(id!)).toMatchObject({ status: 'delivered', attempts: 1, partsSent: 2, lastStatusCode: 200 });
+  });
+
+  it('resumes after a failed part', async () => {
+    const now = 8_010_000_000_000;
+    const m = marker();
+    const [id] = await seed(longBody(m), ['telegram'], now);
+    const cfg = configFor(TG_ENV);
+    const first = fakeFetch(m, () => {
+      const last = tgParts(first.mine()).at(-1);
+      return new Response('{}', { status: last === '2/3' ? 502 : 200 });
+    });
+    await processDeliveries(deps(cfg, first.fn, now), [id!]);
+    expect(tgParts(first.mine())).toEqual(['1/3', '2/3']);
+    const row = await rowById(id!);
+    expect(row).toMatchObject({ status: 'pending', attempts: 1, partsSent: 1, lastError: 'http_502' });
+
+    const again = fakeFetch(m, ok);
+    await retryDue(deps(cfg, again.fn, row.nextAttemptAt!));
+    expect(tgParts(again.mine())).toEqual(['2/3', '3/3']);
+    expect(await rowById(id!)).toMatchObject({ status: 'delivered', attempts: 2, partsSent: 2 });
+  });
+
+  it('a permanent error on part 1 fails', async () => {
+    const now = 8_020_000_000_000;
+    const m = marker();
+    const [id] = await seed(longBody(m), ['telegram'], now);
+    const f = fakeFetch(m, status(400));
+    await processDeliveries(deps(configFor(TG_ENV), f.fn, now), [id!]);
+    expect(f.mine()).toHaveLength(1);
+    expect(await rowById(id!)).toMatchObject({ status: 'failed', partsSent: 0, lastError: 'http_400' });
+  });
+
+  it('Retry-After on a part is honoured', async () => {
+    const now = 8_030_000_000_000;
+    const m = marker();
+    const [id] = await seed(longBody(m), ['telegram'], now);
+    const f = fakeFetch(m, () =>
+      tgParts(f.mine()).at(-1) === '2/3'
+        ? new Response('{"ok":false,"parameters":{"retry_after":120}}', { status: 429 })
+        : new Response('{"ok":true}', { status: 200 }),
+    );
+    await processDeliveries(deps(configFor(TG_ENV), f.fn, now), [id!]);
+    expect(await rowById(id!)).toMatchObject({
+      status: 'pending',
+      partsSent: 1,
+      lastError: 'http_429',
+      nextAttemptAt: now + 120_000,
+    });
+  });
+
+  it('a lost lease stops the parts', async () => {
+    const spy = vi.spyOn(console, 'log');
+    const now = 8_040_000_000_000;
+    const m = marker();
+    const [id] = await seed(longBody(m), ['telegram'], now);
+    const f = fakeFetch(m, async () => {
+      await env.DB.prepare('UPDATE deliveries SET locked_until = 1 WHERE id = ?').bind(id!).run();
+      return new Response('{"ok":true}', { status: 200 });
+    });
+    await processDeliveries(deps(configFor(TG_ENV), f.fn, now), [id!]);
+    const lines = spy.mock.calls.map((c) => JSON.parse(String(c[0])) as Record<string, unknown>);
+    spy.mockRestore();
+    expect(tgParts(f.mine())).toEqual(['1/3']);
+    expect(await rowById(id!)).toMatchObject({ status: 'pending', attempts: 1, partsSent: 0, lockedUntil: 1 });
+    const mineLines = lines.filter((l) => l.deliveryId === id);
+    expect(mineLines).toEqual([{ event: 'internal.error', deliveryId: id, error: 'lease_lost' }]);
+  });
+
+  it('nothing left to send is delivered', async () => {
+    const now = 8_050_000_000_000;
+    const m = marker();
+    const [id] = await seed(longBody(m), ['telegram'], now);
+    await env.DB.prepare('UPDATE deliveries SET parts_sent = 3 WHERE id = ?').bind(id!).run();
+    const f = fakeFetch(m, ok);
+    await processDeliveries(deps(configFor(TG_ENV), f.fn, now), [id!]);
+    expect(f.mine()).toHaveLength(0);
+    expect(await rowById(id!)).toMatchObject({ status: 'delivered', attempts: 1, lastStatusCode: 200 });
+  });
+
+  it('a single-part message does not write parts_sent', async () => {
+    const now = 8_060_000_000_000;
+    const m = marker();
+    const [id] = await seed(m, ['telegram'], now);
+    const f = fakeFetch(m, ok);
+    await processDeliveries(deps(configFor(TG_ENV), f.fn, now), [id!]);
+    expect(tgParts(f.mine())).toEqual(['single']);
+    expect(await rowById(id!)).toMatchObject({ status: 'delivered', partsSent: 0 });
+  });
+
+  it('the webhook ignores parts', async () => {
+    const now = 8_070_000_000_000;
+    const m = marker();
+    const body = longBody(m);
+    const ids = await seed(body, ['telegram', 'webhook'], now);
+    const f = fakeFetch(m, ok);
+    await processDeliveries(deps(configFor({ ...TG_ENV, ...HOOK_ENV }), f.fn, now), ids);
+    const hook = f.mine().filter((s) => s.url === HOOK_URL);
+    expect(hook).toHaveLength(1);
+    expect((JSON.parse(hook[0]!.body) as { message: { body: string } }).message.body).toBe(body);
+    expect(tgParts(f.mine())).toEqual(['1/3', '2/3', '3/3']);
+  });
+});

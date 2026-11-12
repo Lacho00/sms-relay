@@ -1,15 +1,16 @@
-import type { Config } from '../config';
+import type { Config, TelegramConfig } from '../config';
 import {
   claimDelivery,
   dueDeliveryIds,
   getMessage,
   markDelivered,
   markFailed,
+  markPartSent,
   markRetry,
   type DeliveryRow,
   type MessageRow,
 } from '../db/repo';
-import { formatTelegramText, sendTelegramText } from '../destinations/telegram';
+import { sendTelegramText, telegramParts } from '../destinations/telegram';
 import { sendWebhook } from '../destinations/webhook';
 import { log, type LogError } from '../log';
 import { classify, errorCode, nextDelayMs, type SendResult } from './backoff';
@@ -19,18 +20,43 @@ export type OutboxDeps = { db: D1Database; config: Config; fetch: typeof fetch; 
 export const CRON_BATCH = 50;
 export const CONCURRENCY = 5;
 
+/** The lease was lost while sending: the attempt must write nothing more. */
+const LEASE_LOST = 'lease_lost';
+type Outcome = SendResult | typeof LEASE_LOST;
+
+/** Every part was accepted with a 2xx by an earlier attempt. */
+const ALL_SENT: SendResult = { kind: 'response', status: 200, retryAfterMs: null };
+
+/**
+ * Sends the Telegram parts after `row.partsSent`, in order, and stops at the first non-2xx. Each
+ * accepted part that is not the last is recorded under the lease, so a retry resumes at the first
+ * unsent part. Returns the result of the last part sent, or LEASE_LOST when a progress write
+ * changed no row.
+ */
+async function sendTelegramParts(
+  deps: OutboxDeps,
+  telegram: TelegramConfig,
+  row: DeliveryRow,
+  m: MessageRow,
+  lease: number,
+): Promise<Outcome> {
+  const { config } = deps;
+  const parts = telegramParts(m, config.displayTimeZone);
+  let result = ALL_SENT;
+  for (let k = row.partsSent + 1; k <= parts.length; k++) {
+    result = await sendTelegramText(deps.fetch, telegram, config.telegramApiBase, parts[k - 1]!, deps.now());
+    if (classify(result) !== 'delivered') return result;
+    if (k < parts.length && !(await markPartSent(deps.db, row.id, lease, k, deps.now()))) return LEASE_LOST;
+  }
+  return result;
+}
+
 /** Sends one delivery to its destination; null when that destination is no longer configured. */
-function send(deps: OutboxDeps, row: DeliveryRow, m: MessageRow, now: number): Promise<SendResult> | null {
+function send(deps: OutboxDeps, row: DeliveryRow, m: MessageRow, lease: number, now: number): Promise<Outcome> | null {
   const { config } = deps;
   if (row.destination === 'telegram') {
     if (!config.telegram) return null;
-    return sendTelegramText(
-      deps.fetch,
-      config.telegram,
-      config.telegramApiBase,
-      formatTelegramText(m, config.displayTimeZone),
-      now,
-    );
+    return sendTelegramParts(deps, config.telegram, row, m, lease);
   }
   if (!config.webhook) return null;
   return sendWebhook(deps.fetch, config.webhook, m, row.id, now);
@@ -50,9 +76,10 @@ async function processOne(deps: OutboxDeps, id: number): Promise<void> {
   const lease = row.lockedUntil!;
   const base = { deliveryId: id, destination: row.destination, attempt };
 
+  const leaseLost = () => log('internal.error', { deliveryId: id, error: LEASE_LOST });
   const settled = (changed: boolean, event: () => void) => {
     if (changed) event();
-    else log('internal.error', { deliveryId: id, error: 'lease_lost' });
+    else leaseLost();
   };
   const fail = async (error: LogError, status: number | null, now: number, ms?: number) => {
     const changed = await markFailed(db, id, lease, attempt, error, status, now);
@@ -65,9 +92,10 @@ async function processOne(deps: OutboxDeps, id: number): Promise<void> {
   const m = await getMessage(db, row.messageId);
   if (!m) return fail('message_missing', null, claimedAt);
 
-  const pending = send(deps, row, m, claimedAt);
+  const pending = send(deps, row, m, lease, claimedAt);
   if (!pending) return fail('destination_removed', null, claimedAt);
   const result = await pending;
+  if (result === LEASE_LOST) return leaseLost();
   const now = deps.now();
   const ms = now - claimedAt;
   const status = result.kind === 'response' ? result.status : null;
