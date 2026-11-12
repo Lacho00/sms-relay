@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { sendAlerts } from './alerts';
 import { parseConfig } from './config';
 import { errorBody } from './http/errors';
 import { handleIngest } from './ingest/handler';
@@ -59,23 +60,39 @@ export function createApp(deps: Partial<AppDeps> = {}): Hono<{ Bindings: Env }> 
   return app;
 }
 
-/** The cron handler: purges expired messages, then retries due deliveries, through `waitUntil`. */
+/** Runs the steps in order. A step that throws is logged without its error, and the next step still runs. */
+export async function runCronSteps(steps: Array<() => Promise<unknown>>): Promise<void> {
+  for (const step of steps) {
+    try {
+      await step();
+    } catch {
+      log('internal.error', { error: 'internal' });
+    }
+  }
+}
+
+/** The cron handler: purges expired messages, retries due deliveries, then sends the failure alert, through `waitUntil`. */
 export function createScheduled(
   deps: Partial<Runtime> = {},
 ): (controller: ScheduledController, env: Env, ctx: ExecutionContext) => Promise<void> {
   const runtime = resolveRuntime(deps);
   return async (_controller, env, ctx) => {
     ctx.waitUntil(
-      withOutbox(env, runtime, async (d) => {
-        // A failed purge must not stop the retries. The error itself is not logged: it could carry data.
-        try {
-          const count = await purgeExpired(d.db, d.config.retentionDays, d.now());
-          if (count > 0) log('retention.purged', { count });
-        } catch {
-          log('retention.failed', { error: 'internal' });
-        }
-        await retryDue(d);
-      }).catch(() => {
+      withOutbox(env, runtime, (d) =>
+        runCronSteps([
+          async () => {
+            // The error itself is not logged: it could carry data.
+            try {
+              const count = await purgeExpired(d.db, d.config.retentionDays, d.now());
+              if (count > 0) log('retention.purged', { count });
+            } catch {
+              log('retention.failed', { error: 'internal' });
+            }
+          },
+          () => retryDue(d),
+          () => sendAlerts(d),
+        ]),
+      ).catch(() => {
         log('internal.error', { error: 'internal' });
       }),
     );
