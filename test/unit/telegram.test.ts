@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { sendJson } from '../../src/destinations/http';
-import { TELEGRAM_MAX_CHARS, formatTelegramText, sendTelegram } from '../../src/destinations/telegram';
+import {
+  TELEGRAM_MAX_CHARS,
+  formatTelegramText,
+  sendTelegramText,
+  splitTelegramText,
+  telegramParts,
+} from '../../src/destinations/telegram';
 import type { TelegramConfig } from '../../src/config';
 import type { MessageRow } from '../../src/db/repo';
 
@@ -27,29 +33,71 @@ describe('formatTelegramText', () => {
   it('formats in a zone', () => {
     expect(formatTelegramText(msg(), 'Europe/Madrid').split('\n')[1]).toBe('2025-11-09 15:03 Europe/Madrid');
   });
-  it('cuts long text with an ellipsis', () => {
-    const t = formatTelegramText(msg({ body: 'x'.repeat(5000) }), 'UTC');
-    expect(t.length).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
-    expect(t.endsWith('…')).toBe(true);
-  });
-  it('does not leave a lone surrogate', () => {
-    const t = formatTelegramText(msg({ body: '😀'.repeat(3000) }), 'UTC');
-    expect(t.length).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
-    expect(t.endsWith('…')).toBe(true);
-    expect(t.slice(0, -1)).not.toMatch(/[\uD800-\uDBFF]$/);
-  });
-  it('does not cut text that fits exactly', () => {
-    const head = formatTelegramText(msg({ body: '' }), 'UTC').length;
-    const t = formatTelegramText(msg({ body: 'x'.repeat(TELEGRAM_MAX_CHARS - head) }), 'UTC');
-    expect(t.length).toBe(TELEGRAM_MAX_CHARS);
-    expect(t.endsWith('…')).toBe(false);
+  it('keeps the full body', () => {
+    const body = 'x'.repeat(10_000);
+    const t = formatTelegramText(msg({ body }), 'UTC');
+    expect(t.endsWith(body)).toBe(true);
+    expect(t).not.toContain('…');
   });
 });
 
-describe('sendTelegram', () => {
+const unmark = (parts: string[]) => parts.map((p) => p.replace(/^\(\d+\/\d+\)\n/, ''));
+
+describe('splitTelegramText', () => {
+  it('short text is one part, unchanged', () => {
+    const t = 'z'.repeat(TELEGRAM_MAX_CHARS);
+    expect(splitTelegramText(t)).toEqual([t]);
+  });
+  it('a 10 000-char body gives 3 parts', () => {
+    const body = ('a'.repeat(79) + ' ').repeat(125);
+    const parts = telegramParts(msg({ body }), 'UTC');
+    expect(parts).toHaveLength(3);
+    parts.forEach((p, i) => {
+      expect(p.startsWith(`(${i + 1}/3)\n`)).toBe(true);
+      expect(p.length).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
+    });
+    expect(parts[0]).toContain('SMS from ');
+    expect(parts[1]).not.toContain('SMS from ');
+    expect(parts[2]).not.toContain('SMS from ');
+  });
+  it('prefers a newline near the end', () => {
+    const win = TELEGRAM_MAX_CHARS - '(1/2)\n'.length;
+    const text = ('abcdefghi ').repeat(Math.ceil(9000 / 10)).slice(0, 9000).split('');
+    text[win - 100] = '\n';
+    const parts = splitTelegramText(text.join(''));
+    expect(parts[0]).toBe(`(1/${parts.length})\n${text.slice(0, win - 100).join('')}`);
+    expect(unmark(parts)[1]).toMatch(/^\S/);
+  });
+  it('no whitespace hard-cuts', () => {
+    const parts = splitTelegramText('x'.repeat(9000));
+    parts.forEach((p) => expect(p.length).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS));
+    expect(unmark(parts).join('')).toBe('x'.repeat(9000));
+  });
+  it('never splits a surrogate pair', () => {
+    const input = '😀'.repeat(3000);
+    const parts = splitTelegramText(input);
+    for (const p of parts) {
+      expect(p).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+      expect(p.length).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
+    }
+    expect(unmark(parts).join('')).toBe(input);
+  });
+  it('marker width is stable past 9 parts', () => {
+    const parts = splitTelegramText('y'.repeat(50_000));
+    expect(parts).toHaveLength(13);
+    expect(parts[12]!.startsWith('(13/13)\n')).toBe(true);
+    parts.forEach((p) => expect(p.length).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS));
+  });
+  it('honours a custom max', () => {
+    const parts = splitTelegramText('ab cd ef gh ij kl', 12);
+    parts.forEach((p) => expect(p.length).toBeLessThanOrEqual(12));
+  });
+});
+
+describe('sendTelegramText', () => {
   it('posts the expected request', async () => {
     const f = fake(new Response('{"ok":true}', { status: 200 }));
-    const r = await sendTelegram(f.fn, cfg, 'https://api.example', 'UTC', msg(), 0);
+    const r = await sendTelegramText(f.fn, cfg, 'https://api.example', formatTelegramText(msg(), 'UTC'), 0);
     expect(r).toEqual({ kind: 'response', status: 200, retryAfterMs: null });
     expect(f.calls[0]!.url).toBe('https://api.example/botTOKEN/sendMessage');
     expect(f.calls[0]!.init.method).toBe('POST');
@@ -62,26 +110,26 @@ describe('sendTelegram', () => {
   });
   it('reads retry_after from the 429 body', async () => {
     const f = fake(new Response('{"parameters":{"retry_after":30}}', { status: 429 }));
-    expect(await sendTelegram(f.fn, cfg, 'https://a', 'UTC', msg(), 0)).toEqual({
+    expect(await sendTelegramText(f.fn, cfg, 'https://a', 'hi', 0)).toEqual({
       kind: 'response', status: 429, retryAfterMs: 30000,
     });
   });
   it('maps TimeoutError to timeout and others to network', async () => {
     const t = fake(new DOMException('t', 'TimeoutError'));
-    expect(await sendTelegram(t.fn, cfg, 'https://a', 'UTC', msg(), 0)).toEqual({ kind: 'timeout' });
+    expect(await sendTelegramText(t.fn, cfg, 'https://a', 'hi', 0)).toEqual({ kind: 'timeout' });
     const n = fake(new TypeError('x'));
-    expect(await sendTelegram(n.fn, cfg, 'https://a', 'UTC', msg(), 0)).toEqual({ kind: 'network' });
+    expect(await sendTelegramText(n.fn, cfg, 'https://a', 'hi', 0)).toEqual({ kind: 'network' });
   });
   it('reports a 302 without following', async () => {
     const f = fake(new Response(null, { status: 302, headers: { location: 'https://evil' } }));
-    expect(await sendTelegram(f.fn, cfg, 'https://a', 'UTC', msg(), 0)).toEqual({
+    expect(await sendTelegramText(f.fn, cfg, 'https://a', 'hi', 0)).toEqual({
       kind: 'response', status: 302, retryAfterMs: null,
     });
     expect(f.calls[0]!.init.redirect).toBe('manual');
   });
   it('falls back to the header when the body has no retry_after', async () => {
     const f = fake(new Response('{"ok":false}', { status: 429, headers: { 'Retry-After': '7' } }));
-    expect(await sendTelegram(f.fn, cfg, 'https://a', 'UTC', msg(), 0)).toEqual({
+    expect(await sendTelegramText(f.fn, cfg, 'https://a', 'hi', 0)).toEqual({
       kind: 'response', status: 429, retryAfterMs: 7000,
     });
   });

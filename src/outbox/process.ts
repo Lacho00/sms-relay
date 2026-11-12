@@ -9,7 +9,7 @@ import {
   type DeliveryRow,
   type MessageRow,
 } from '../db/repo';
-import { sendTelegram } from '../destinations/telegram';
+import { formatTelegramText, sendTelegramText } from '../destinations/telegram';
 import { sendWebhook } from '../destinations/webhook';
 import { log, type LogError } from '../log';
 import { classify, errorCode, nextDelayMs, type SendResult } from './backoff';
@@ -24,7 +24,13 @@ function send(deps: OutboxDeps, row: DeliveryRow, m: MessageRow, now: number): P
   const { config } = deps;
   if (row.destination === 'telegram') {
     if (!config.telegram) return null;
-    return sendTelegram(deps.fetch, config.telegram, config.telegramApiBase, config.displayTimeZone, m, now);
+    return sendTelegramText(
+      deps.fetch,
+      config.telegram,
+      config.telegramApiBase,
+      formatTelegramText(m, config.displayTimeZone),
+      now,
+    );
   }
   if (!config.webhook) return null;
   return sendWebhook(deps.fetch, config.webhook, m, row.id, now);
