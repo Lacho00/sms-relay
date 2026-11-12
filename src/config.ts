@@ -13,6 +13,7 @@ export type Config = {
   maxAttempts: number;
   displayTimeZone: string;
   telegramApiBase: string;
+  alertsEnabled: boolean;
 };
 export type ConfigVariable =
   | 'INGEST_TOKEN'
@@ -28,7 +29,8 @@ export type ConfigVariable =
   | 'RETENTION_DAYS'
   | 'MAX_ATTEMPTS'
   | 'DISPLAY_TIMEZONE'
-  | 'TELEGRAM_API_BASE';
+  | 'TELEGRAM_API_BASE'
+  | 'ALERTS_ENABLED';
 export type ConfigResult = { ok: true; config: Config } | { ok: false; variable: ConfigVariable };
 
 const MIN_SECRET_LENGTH = 32;
@@ -55,6 +57,7 @@ const httpUrl = z.string().refine((s) => {
 });
 const nonNegativeInt = z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().min(0));
 const attempts = z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().min(1).max(50));
+const boolFlag = z.enum(['true', 'false']).transform((v) => v === 'true');
 const timeZone = z.string().refine((tz) => {
   try {
     new Intl.DateTimeFormat('en', { timeZone: tz });
@@ -148,6 +151,7 @@ function build(env: Record<string, unknown>): Config {
       'TELEGRAM_API_BASE',
       read(env, 'TELEGRAM_API_BASE') ?? 'https://api.telegram.org',
     ).replace(/\/+$/, ''),
+    alertsEnabled: check(boolFlag, 'ALERTS_ENABLED', read(env, 'ALERTS_ENABLED') ?? 'true'),
   };
 }
 

@@ -12,6 +12,11 @@ export type LogEvent =
   | 'delivery.failed'
   | 'retention.purged'
   | 'retention.failed'
+  | 'alert.sent'
+  | 'alert.retry'
+  | 'alert.failed'
+  | 'alert.suppressed'
+  | 'read.rejected'
   | 'config.invalid'
   | 'internal.error';
 
@@ -19,7 +24,7 @@ export type LogEvent =
  * Closed set of safe fields: no free text, so a sender or body cannot be logged.
  * `error` takes only codes made here (ErrorCode, `http_<n>`, `timeout`, `network`,
  * `redirect`, `destination_removed`, `message_missing`,
- * `attempts_exhausted`, `lease_lost`); `variable` takes only config variable names.
+ * `attempts_exhausted`, `lease_lost`, `rate_limit_unavailable`); `variable` takes only config variable names.
  */
 export type LogError =
   | ErrorCode
@@ -30,7 +35,8 @@ export type LogError =
   | 'destination_removed'
   | 'message_missing'
   | 'attempts_exhausted'
-  | 'lease_lost';
+  | 'lease_lost'
+  | 'rate_limit_unavailable';
 
 export type LogFields = {
   id?: number;

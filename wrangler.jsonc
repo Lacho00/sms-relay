@@ -12,6 +12,18 @@
       "migrations_dir": "drizzle"
     }
   ],
+  "ratelimits": [
+    {
+      "name": "INGEST_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 120, "period": 60 }
+    },
+    {
+      "name": "READ_LIMITER",
+      "namespace_id": "1002",
+      "simple": { "limit": 60, "period": 60 }
+    }
+  ],
   "triggers": {
     "crons": ["* * * * *"]
   },
@@ -19,6 +31,7 @@
     "RETENTION_DAYS": "30",
     "MAX_ATTEMPTS": "10",
     "DISPLAY_TIMEZONE": "UTC",
-    "TELEGRAM_API_BASE": "https://api.telegram.org"
+    "TELEGRAM_API_BASE": "https://api.telegram.org",
+    "ALERTS_ENABLED": "true"
   }
 }
