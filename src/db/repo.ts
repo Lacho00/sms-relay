@@ -281,3 +281,46 @@ export async function listMessages(
   }
   return { rows, deliveries };
 }
+
+export type AlertRow = {
+  id: number;
+  messageId: number;
+  destination: Destination;
+  lastError: string | null;
+  attempts: number;
+};
+
+/**
+ * Marks up to `limit` failed, not yet alerted deliveries as alerted at `now` and returns them,
+ * oldest first. One statement, so overlapping cron runs never claim the same row.
+ */
+export async function claimAlerts(db: D1Database, now: number, limit: number): Promise<AlertRow[]> {
+  const { results } = await db
+    .prepare(
+      `UPDATE deliveries SET alerted_at = ?
+       WHERE id IN (SELECT id FROM deliveries WHERE status = 'failed' AND alerted_at IS NULL ORDER BY id LIMIT ?)
+         AND alerted_at IS NULL
+       RETURNING id, message_id, destination, last_error, attempts`,
+    )
+    .bind(now, limit)
+    .all<{ id: number; message_id: number; destination: Destination; last_error: string | null; attempts: number }>();
+  return results
+    .map((r) => ({
+      id: r.id,
+      messageId: r.message_id,
+      destination: r.destination,
+      lastError: r.last_error,
+      attempts: r.attempts,
+    }))
+    .sort((a, b) => a.id - b.id);
+}
+
+/** Gives back a claim made at `claimedAt`; a row claimed again since keeps its newer mark. */
+export async function releaseAlerts(db: D1Database, ids: number[], claimedAt: number): Promise<void> {
+  if (ids.length === 0) return;
+  const marks = ids.map(() => '?').join(', ');
+  await db
+    .prepare(`UPDATE deliveries SET alerted_at = NULL WHERE id IN (${marks}) AND alerted_at = ?`)
+    .bind(...ids, claimedAt)
+    .run();
+}
