@@ -145,6 +145,25 @@ describe('failure alerts', () => {
     expect(next.alerts).toHaveLength(0);
   });
 
+  it('a failed release is traced as alert.failed and does not throw', async () => {
+    const at = 8_131_000_000_000;
+    await seedFailed(2, at);
+    const spy = vi.spyOn(console, 'log');
+    const bad = fakeFetch({ alert: () => new Response('{}', { status: 502 }) });
+    const d = deps(configFor(TG_ENV), bad.fn, at + 1);
+    const db = {
+      prepare: (sql: string) => {
+        if (sql.includes('alerted_at = NULL')) throw new Error('d1 down');
+        return env.DB.prepare(sql);
+      },
+    } as unknown as D1Database;
+    await expect(sendAlerts({ ...d, db })).resolves.toBeUndefined();
+    const events = logged(spy);
+    spy.mockRestore();
+    expect(events.filter((e: Record<string, unknown>) => e.event === 'alert.failed')).toEqual([{ event: 'alert.failed', count: 2, error: 'internal' }]);
+    expect(events.some((e: Record<string, unknown>) => e.event === 'alert.retry')).toBe(false);
+  });
+
   it('a network failure releases the claim and logs without a status', async () => {
     const at = 8_135_000_000_000;
     const ids = await seedFailed(1, at);

@@ -49,7 +49,13 @@ export async function sendAlerts(deps: OutboxDeps): Promise<void> {
   }
   const error = errorCode(result) as LogError;
   if (verdict === 'retry') {
-    await releaseAlerts(deps.db, rows.map((r) => r.id), claimedAt);
+    try {
+      await releaseAlerts(deps.db, rows.map((r) => r.id), claimedAt);
+    } catch {
+      // The claim stays set, so these rows are not alerted again. The error itself is not logged.
+      log('alert.failed', { count, error: 'internal' });
+      return;
+    }
     log('alert.retry', { count, error });
     return;
   }
