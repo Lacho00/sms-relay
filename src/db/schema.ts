@@ -34,11 +34,14 @@ export const deliveries = sqliteTable(
     lastError: text('last_error'),
     lastStatusCode: integer('last_status_code'),
     deliveredAt: integer('delivered_at'),
+    alertedAt: integer('alerted_at'),
+    partsSent: integer('parts_sent').notNull().default(0),
     createdAt: integer('created_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
   },
   (t) => [
     index('deliveries_status_next_attempt_idx').on(t.status, t.nextAttemptAt),
+    index('deliveries_status_alerted_idx').on(t.status, t.alertedAt),
     uniqueIndex('deliveries_message_destination_unique').on(t.messageId, t.destination),
   ],
 );

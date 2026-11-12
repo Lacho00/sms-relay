@@ -24,6 +24,8 @@ export type DeliveryRow = {
   lastError: string | null;
   lastStatusCode: number | null;
   deliveredAt: number | null;
+  alertedAt: number | null;
+  partsSent: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -106,6 +108,8 @@ type DeliverySql = {
   last_error: string | null;
   last_status_code: number | null;
   delivered_at: number | null;
+  alerted_at: number | null;
+  parts_sent: number;
   created_at: number;
   updated_at: number;
 };
@@ -122,6 +126,8 @@ function toDeliveryRow(r: DeliverySql): DeliveryRow {
     lastError: r.last_error,
     lastStatusCode: r.last_status_code,
     deliveredAt: r.delivered_at,
+    alertedAt: r.alerted_at,
+    partsSent: r.parts_sent,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -203,6 +209,23 @@ export async function markRetry(
        WHERE id = ? AND status = 'pending' AND locked_until = ?`,
     )
     .bind(attempts, nextAt, error, status, now, id, lease)
+    .run();
+  return r.meta.changes > 0;
+}
+
+export async function markPartSent(
+  db: D1Database,
+  id: number,
+  lease: number,
+  partsSent: number,
+  now: number,
+): Promise<boolean> {
+  const r = await db
+    .prepare(
+      `UPDATE deliveries SET parts_sent = ?, updated_at = ?
+       WHERE id = ? AND status = 'pending' AND locked_until = ?`,
+    )
+    .bind(partsSent, now, id, lease)
     .run();
   return r.meta.changes > 0;
 }

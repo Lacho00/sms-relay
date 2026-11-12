@@ -12,7 +12,11 @@ describe('db schema', () => {
       'messages_dedup_key_unique',
     ]);
     expect(d.name).toBe('deliveries');
-    expect(d.indexes).toHaveLength(2);
+    expect(d.indexes.map((i) => i.config.name).sort()).toEqual([
+      'deliveries_message_destination_unique',
+      'deliveries_status_alerted_idx',
+      'deliveries_status_next_attempt_idx',
+    ]);
     const fk = d.foreignKeys[0]!.reference();
     expect(fk.foreignTable).toBe(messages);
     expect(d.foreignKeys[0]!.onDelete).toBe('cascade');
