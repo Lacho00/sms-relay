@@ -168,4 +168,18 @@ describe('parseConfig', () => {
       expect(JSON.stringify(r)).not.toContain(bad);
     }
   });
+
+  it('defaults ALERTS_ENABLED to true and treats empty as unset', () => {
+    expect(ok({}).alertsEnabled).toBe(true);
+    expect(ok({ ALERTS_ENABLED: '' }).alertsEnabled).toBe(true);
+  });
+
+  it('parses ALERTS_ENABLED false, and trims whitespace around true', () => {
+    expect(ok({ ALERTS_ENABLED: 'false' }).alertsEnabled).toBe(false);
+    expect(ok({ ALERTS_ENABLED: ' true ' }).alertsEnabled).toBe(true);
+  });
+
+  it.each(['yes', 'TRUE', '0', 'on'])('rejects ALERTS_ENABLED %s', (v) => {
+    expect(failing({ ALERTS_ENABLED: v })).toBe('ALERTS_ENABLED');
+  });
 });

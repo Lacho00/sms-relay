@@ -3,9 +3,12 @@ import { parseConfig } from '../config';
 import { getDeliveries, getMessage, listMessages, type DeliveryRow, type MessageRow } from '../db/repo';
 import { bearerToken, tokensEqual } from '../http/auth';
 import { errorResponse } from '../http/errors';
+import { isAllowed, rateLimitedResponse, type Limiter } from '../http/rate-limit';
 import { log } from '../log';
 
 type Ctx = Context<{ Bindings: Env }>;
+
+export type ReadDeps = { limiters: (env: Env) => { read: Limiter } };
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
@@ -59,8 +62,8 @@ function deliveryJson(d: DeliveryRow) {
   };
 }
 
-/** Config and auth for the read routes; returns a Response to send when the request is refused. */
-async function guard(c: Ctx): Promise<Response | null> {
+/** Config, rate limit and auth for the read routes; returns a Response to send when the request is refused. */
+async function guard(c: Ctx, deps: ReadDeps): Promise<Response | null> {
   const parsed = parseConfig(c.env as unknown as Record<string, unknown>);
   if (!parsed.ok) {
     log('config.invalid', { variable: parsed.variable });
@@ -68,6 +71,10 @@ async function guard(c: Ctx): Promise<Response | null> {
   }
   const token = parsed.config.readToken;
   if (token === null) return errorResponse(503, 'not_configured', 'Read API is not configured');
+  if (!(await isAllowed(deps.limiters(c.env).read, 'read', c.req.raw))) {
+    log('read.rejected', { status: 429, error: 'rate_limited' });
+    return rateLimitedResponse();
+  }
   const presented = bearerToken(c.req.header('Authorization'));
   if (presented === null || !(await tokensEqual(presented, token))) {
     return errorResponse(401, 'unauthorized', 'Missing or invalid bearer token');
@@ -78,8 +85,8 @@ async function guard(c: Ctx): Promise<Response | null> {
 const bad = (message: string) => errorResponse(400, 'validation_failed', message);
 
 /** GET /v1/messages?limit=&cursor= */
-export async function handleList(c: Ctx): Promise<Response> {
-  const refused = await guard(c);
+export async function handleList(c: Ctx, deps: ReadDeps): Promise<Response> {
+  const refused = await guard(c, deps);
   if (refused) return refused;
 
   const q = new URL(c.req.url).searchParams;
@@ -112,8 +119,8 @@ export async function handleList(c: Ctx): Promise<Response> {
 }
 
 /** GET /v1/messages/:id */
-export async function handleDetail(c: Ctx): Promise<Response> {
-  const refused = await guard(c);
+export async function handleDetail(c: Ctx, deps: ReadDeps): Promise<Response> {
+  const refused = await guard(c, deps);
   if (refused) return refused;
 
   const id = parseId(c.req.param('id') ?? '');

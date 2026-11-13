@@ -42,6 +42,7 @@ describe('selectDestinations', () => {
     maxAttempts: 10,
     displayTimeZone: 'UTC',
     telegramApiBase: 'https://api.telegram.org',
+    alertsEnabled: true,
   };
   const telegram = (filter: SenderFilter) => ({ botToken: 't', chatId: '1', filter });
   const webhook = (filter: SenderFilter) => ({ url: 'https://h', secret: 's'.repeat(32), filter });

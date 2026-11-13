@@ -15,7 +15,9 @@ const BOT_TOKEN = '987654:BOTSECRET-c0de-bot-token-value';
 const CHAT_ID = '-100777313';
 const HOOK_URL = 'https://hook.test/in/HOOKURLSECRET-3e9a';
 const HOOK_SECRET = 'HOOKSECRET-a7c5-0123456789abcdef0123456789';
-const MARKERS = [SENDER, BODY, INGEST, READ, BOT_TOKEN, CHAT_ID, HOOK_URL, HOOK_SECRET, 'SECRET-', 'BOT-TOKEN', 'HOOKURL'];
+const IP = '203.0.113.77';
+const ALERT_MARK = 'sms-relay:';
+const MARKERS = [IP, SENDER, BODY, INGEST, READ, BOT_TOKEN, CHAT_ID, HOOK_URL, HOOK_SECRET, 'SECRET-', 'BOT-TOKEN', 'HOOKURL'];
 
 const testEnv = (): Env =>
   ({
@@ -106,6 +108,85 @@ describe('log safety', () => {
     }
     for (const line of captured) {
       for (const marker of MARKERS) expect(line, marker).not.toContain(marker);
+    }
+  });
+
+  it('never logs sms content, secrets, chat id or client ip across parts, alerts and rate limits', async () => {
+    const captured: string[] = [];
+    const grab = (...args: unknown[]) =>
+      captured.push(args.map((a) => (typeof a === 'string' ? a : (JSON.stringify(a) ?? String(a)))).join(' '));
+    for (const m of ['log', 'warn', 'error', 'info', 'debug'] as const) vi.spyOn(console, m).mockImplementation(grab);
+
+    const longBody = Array.from({ length: 950 }, () => BODY).join(' ');
+    const sent = { part2Fails: 1, alert502: 1, alerts: 0, parts: 0 };
+    const fetchFn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith(TG_BASE)) {
+        const text = (JSON.parse(String(init?.body ?? '{}')) as { text?: string }).text ?? '';
+        if (text.startsWith(ALERT_MARK)) {
+          sent.alerts++;
+          if (sent.alert502 > 0) {
+            sent.alert502--;
+            return new Response('{}', { status: 502 });
+          }
+          return new Response('{"ok":true}', { status: 200 });
+        }
+        sent.parts++;
+        if (text.startsWith('(2/3)') && sent.part2Fails > 0) {
+          sent.part2Fails--;
+          return new Response('{}', { status: 502 });
+        }
+        return new Response('{"ok":true}', { status: 200 });
+      }
+      return new Response('{}', { status: 404 }); // webhook: permanent failure
+    }) as unknown as typeof fetch;
+
+    let now = NOW;
+    let deny = false;
+    const limiter = { limit: async (_o: { key: string }) => ({ success: !deny }) };
+    const deps = { fetch: fetchFn, now: () => now, limiters: () => ({ ingest: limiter, read: limiter }) };
+    const app = createApp(deps);
+    const scheduled = createScheduled({ fetch: fetchFn, now: () => now });
+    const e = testEnv();
+    const call = async (path: string, init: RequestInit) => {
+      const ctx = createExecutionContext();
+      const res = await app.fetch(new Request(`https://relay.test${path}`, init), e, ctx);
+      await waitOnExecutionContext(ctx);
+      return res;
+    };
+    const cron = async () => {
+      const ctx = createExecutionContext();
+      await scheduled(createScheduledController({ scheduledTime: now, cron: '* * * * *' }), e, ctx);
+      await waitOnExecutionContext(ctx);
+    };
+    const ingest = () =>
+      call('/v1/sms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${INGEST}`, 'CF-Connecting-IP': IP },
+        body: JSON.stringify({ sender: SENDER, body: longBody, received_at: NOW - 1000 }),
+      });
+    const read = () =>
+      call('/v1/messages', { headers: { Authorization: `Bearer ${READ}`, 'CF-Connecting-IP': IP } });
+
+    expect((await ingest()).status).toBe(200);
+    now = NOW + DAY;
+    await cron(); // part 2 resumes, webhook already failed: first alert gets a 502
+    now = NOW + 2 * DAY;
+    await cron(); // alert goes through
+    expect(sent.alerts).toBeGreaterThanOrEqual(2);
+    expect(sent.parts).toBeGreaterThanOrEqual(4);
+
+    deny = true;
+    expect((await ingest()).status).toBe(429);
+    expect((await read()).status).toBe(429);
+
+    const events = captured.map((l) => (JSON.parse(l) as { event: string }).event);
+    expect(events).toContain('ingest.stored');
+    expect(events).toContain('delivery.delivered');
+    for (const ev of ['delivery.failed', 'delivery.retry', 'alert.retry', 'alert.sent', 'ingest.rejected', 'read.rejected'])
+      expect(events, ev).toContain(ev);
+    for (const line of captured) {
+      for (const marker of [...MARKERS, 'SENDER', 'BODY']) expect(line, marker).not.toContain(marker);
     }
   });
 });

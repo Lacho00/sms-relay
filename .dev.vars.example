@@ -35,3 +35,5 @@ READ_TOKEN=change-me-read-token-at-least-32-characters-different
 # DISPLAY_TIMEZONE=UTC
 # Base URL of the Telegram Bot API. Only change it for tests. Default https://api.telegram.org.
 # TELEGRAM_API_BASE=https://api.telegram.org
+# Set to false to turn off the Telegram alerts about failed deliveries. SMS forwarding is not affected. Default true.
+# ALERTS_ENABLED=true

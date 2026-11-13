@@ -1,6 +1,6 @@
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../src/app';
 import { insertMessage, listMessages } from '../../src/db/repo';
 import { decodeCursor, encodeCursor } from '../../src/read/handler';
@@ -11,11 +11,14 @@ const NOW = Date.UTC(2026, 10, 9, 12, 0, 0);
 
 const testEnv = (overrides: Record<string, unknown> = {}): Env => ({ ...env, ...overrides }) as unknown as Env;
 
-async function get(path: string, opts: { token?: string | null; env?: Env } = {}) {
+const ALLOW = { ingest: { limit: async () => ({ success: true }) }, read: { limit: async () => ({ success: true }) } };
+type Lims = { ingest: { limit: (o: { key: string }) => Promise<{ success: boolean }> }; read: { limit: (o: { key: string }) => Promise<{ success: boolean }> } };
+
+async function get(path: string, opts: { token?: string | null; env?: Env; limiters?: Lims } = {}) {
   const token = opts.token === undefined ? READ : opts.token;
   const headers: Record<string, string> = {};
   if (token !== null) headers.Authorization = `Bearer ${token}`;
-  const app = createApp({ now: () => NOW });
+  const app = createApp({ now: () => NOW, limiters: () => opts.limiters ?? ALLOW });
   const ctx = createExecutionContext();
   const res = await app.fetch(new Request(`https://relay.test${path}`, { headers }), opts.env ?? testEnv(), ctx);
   await waitOnExecutionContext(ctx);
@@ -188,5 +191,37 @@ describe('GET /v1/messages/:id', () => {
       expect(r.status, p).toBe(404);
       expect(r.json.error).toBe('not_found');
     }
+  });
+});
+
+describe('read rate limit', () => {
+  it('list and detail over the limit return 429 and log read.rejected', async () => {
+    const spy = vi.spyOn(console, 'log');
+    const deny = { limit: vi.fn(async (_o: { key: string }) => ({ success: false })) };
+    const limiters = { ingest: ALLOW.ingest, read: deny };
+    for (const path of ['/v1/messages', '/v1/messages/1']) {
+      const r = await get(path, { token: 'wrong', limiters });
+      expect(r.status).toBe(429);
+      expect(r.json.error).toBe('rate_limited');
+    }
+    expect(deny.limit).toHaveBeenCalledWith({ key: 'read:unknown' });
+    const lines = spy.mock.calls.map((c) => JSON.parse(c[0] as string));
+    expect(lines.filter((l) => l.event === 'read.rejected' && l.error === 'rate_limited' && l.status === 429)).toHaveLength(2);
+    spy.mockRestore();
+  });
+
+  it('an unconfigured read API answers 503 without consulting the limiter', async () => {
+    const deny = { limit: vi.fn(async () => ({ success: false })) };
+    const r = await get('/v1/messages', { env: testEnv({ READ_TOKEN: undefined }), limiters: { ingest: deny, read: deny } });
+    expect(r.status).toBe(503);
+    expect(deny.limit).not.toHaveBeenCalled();
+  });
+
+  it('/health never calls a limiter', async () => {
+    const deny = { limit: vi.fn(async () => ({ success: false })) };
+    const app = createApp({ limiters: () => ({ ingest: deny, read: deny }) });
+    const res = await app.request('https://relay.test/health', {}, env);
+    expect(res.status).toBe(200);
+    expect(deny.limit).not.toHaveBeenCalled();
   });
 });

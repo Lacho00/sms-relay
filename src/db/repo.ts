@@ -24,6 +24,8 @@ export type DeliveryRow = {
   lastError: string | null;
   lastStatusCode: number | null;
   deliveredAt: number | null;
+  alertedAt: number | null;
+  partsSent: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -106,6 +108,8 @@ type DeliverySql = {
   last_error: string | null;
   last_status_code: number | null;
   delivered_at: number | null;
+  alerted_at: number | null;
+  parts_sent: number;
   created_at: number;
   updated_at: number;
 };
@@ -122,6 +126,8 @@ function toDeliveryRow(r: DeliverySql): DeliveryRow {
     lastError: r.last_error,
     lastStatusCode: r.last_status_code,
     deliveredAt: r.delivered_at,
+    alertedAt: r.alerted_at,
+    partsSent: r.parts_sent,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -207,6 +213,23 @@ export async function markRetry(
   return r.meta.changes > 0;
 }
 
+export async function markPartSent(
+  db: D1Database,
+  id: number,
+  lease: number,
+  partsSent: number,
+  now: number,
+): Promise<boolean> {
+  const r = await db
+    .prepare(
+      `UPDATE deliveries SET parts_sent = ?, updated_at = ?
+       WHERE id = ? AND status = 'pending' AND locked_until = ?`,
+    )
+    .bind(partsSent, now, id, lease)
+    .run();
+  return r.meta.changes > 0;
+}
+
 export async function markFailed(
   db: D1Database,
   id: number,
@@ -257,4 +280,47 @@ export async function listMessages(
     deliveries.set(d.message_id, list);
   }
   return { rows, deliveries };
+}
+
+export type AlertRow = {
+  id: number;
+  messageId: number;
+  destination: Destination;
+  lastError: string | null;
+  attempts: number;
+};
+
+/**
+ * Marks up to `limit` failed, not yet alerted deliveries as alerted at `now` and returns them,
+ * oldest first. One statement, so overlapping cron runs never claim the same row.
+ */
+export async function claimAlerts(db: D1Database, now: number, limit: number): Promise<AlertRow[]> {
+  const { results } = await db
+    .prepare(
+      `UPDATE deliveries SET alerted_at = ?
+       WHERE id IN (SELECT id FROM deliveries WHERE status = 'failed' AND alerted_at IS NULL ORDER BY id LIMIT ?)
+         AND alerted_at IS NULL
+       RETURNING id, message_id, destination, last_error, attempts`,
+    )
+    .bind(now, limit)
+    .all<{ id: number; message_id: number; destination: Destination; last_error: string | null; attempts: number }>();
+  return results
+    .map((r) => ({
+      id: r.id,
+      messageId: r.message_id,
+      destination: r.destination,
+      lastError: r.last_error,
+      attempts: r.attempts,
+    }))
+    .sort((a, b) => a.id - b.id);
+}
+
+/** Gives back a claim made at `claimedAt`; a row claimed again since keeps its newer mark. */
+export async function releaseAlerts(db: D1Database, ids: number[], claimedAt: number): Promise<void> {
+  if (ids.length === 0) return;
+  const marks = ids.map(() => '?').join(', ');
+  await db
+    .prepare(`UPDATE deliveries SET alerted_at = NULL WHERE id IN (${marks}) AND alerted_at = ?`)
+    .bind(...ids, claimedAt)
+    .run();
 }

@@ -11,8 +11,12 @@ webhook through a retrying outbox.
 
 - An accepted SMS is stored before the Worker answers 200. A phone retry never creates a second copy.
 - Delivery to each destination is at-least-once, with exponential backoff and a visible final state.
+- A Telegram alert tells you when a delivery has failed for good, so a failure does not go unnoticed.
+- Ingest and the read API are rate limited per IP address.
+- A long SMS is sent to Telegram in numbered parts, not cut.
 - Logs never contain an SMS body, a sender, a token or a chat id.
-- Runtime dependencies: Hono, Zod and Drizzle only. Configuration is env vars and secrets only.
+- Runtime dependencies: Hono, Zod and Drizzle only. Configuration is env vars and secrets, plus the
+  rate limits in `wrangler.jsonc`.
 
 ## How it works
 
@@ -27,6 +31,7 @@ flowchart LR
   C -->|2. select due pending deliveries| D
   C -->|send| T
   C -->|send| H
+  C -->|3. one alert for newly failed deliveries| T
   T -->|2xx: delivered<br/>retryable: back to pending<br/>other 4xx or attempts used up: failed| D
   H -->|same outcome| D
 ```
@@ -36,6 +41,8 @@ the message plus one `pending` delivery per destination that is configured and w
 filter matches. After answering 200 it tries those deliveries once. Every minute the cron applies
 retention, then retries up to 50 due deliveries (5 at a time). A delivery is claimed with a
 60-second lease, so the immediate attempt and the cron never send the same row at the same time.
+At the end of each cron run, up to 20 deliveries that failed and were not yet reported go into one
+Telegram alert (see Alerts).
 
 Retry rules for a destination response:
 
@@ -83,6 +90,7 @@ Checks run in this order, and the first one that fails answers:
 |---|---|---|
 | 503 | `config_invalid` | A destination is half configured, or a variable is invalid (for example a regex that does not compile) |
 | 503 | `not_configured` | `INGEST_TOKEN` is missing or shorter than 32 characters |
+| 429 | `rate_limited` | Too many requests from this IP address. See Rate limits |
 | 401 | `unauthorized` | Missing or wrong bearer token |
 | 400 | `payload_too_large` | Body over 64 KiB, measured on the bytes read |
 | 400 | `invalid_json` | Body is not valid JSON |
@@ -129,6 +137,7 @@ A destination whose sender filter did not match has no delivery row and does not
 |---|---|---|
 | 503 | `config_invalid` | Same as on ingest |
 | 503 | `not_configured` | `READ_TOKEN` is missing, shorter than 32 characters, or equal to `INGEST_TOKEN` |
+| 429 | `rate_limited` | Too many requests from this IP address. See Rate limits |
 | 401 | `unauthorized` | Missing or wrong bearer token |
 | 400 | `validation_failed` | Bad `limit` or `cursor` |
 | 404 | `not_found` | Unknown or non-numeric id |
@@ -194,6 +203,10 @@ Generate tokens with, for example, `openssl rand -hex 32`. `READ_TOKEN` must dif
 | `MAX_ATTEMPTS` | var | `10` | Integer 1-50 |
 | `DISPLAY_TIMEZONE` | var | `UTC` | IANA name, used in Telegram messages |
 | `TELEGRAM_API_BASE` | var | `https://api.telegram.org` | For tests |
+| `ALERTS_ENABLED` | var | `true` | `true` or `false`. `false` turns off the Telegram alerts about failed deliveries |
+
+The rate limits are not env vars. They are the `ratelimits` bindings `INGEST_LIMITER` (120 requests
+per 60 s) and `READ_LIMITER` (60 per 60 s) in `wrangler.jsonc`; edit them there and redeploy.
 
 Sender filters: `*_SENDERS` is a comma-separated list matched exactly after removing whitespace and
 uppercasing. `*_SENDER_REGEX` is a JavaScript regex (flag `i`) tested on the sender as received.
@@ -265,25 +278,56 @@ Save it as `verify.mjs` and run `node verify.mjs`.
 
 The Worker calls `sendMessage` as plain text (no parse mode, so an SMS cannot break the formatting) with
 link previews disabled, because SMS often carry phishing links. The text is `SMS from <sender>`, the
-time in `DISPLAY_TIMEZONE`, then the body, cut to 4 096 characters with a trailing `…`. The full body
-is always kept in D1.
+time in `DISPLAY_TIMEZONE`, then the full body.
+
+If that text is over 4 096 characters, it is sent as parts, each starting with `(k/n)`. Only part 1
+has the `SMS from` header. Parts break at a newline or a space when there is one near the end.
+Progress is saved after each part, so a retry continues at the first unsent part instead of
+starting over. The webhook always gets the whole message in one request.
+
+## Alerts
+
+When a delivery ends as `failed`, the cron sends one Telegram message that lists up to 20 of them,
+oldest first. More go out in the next runs. Each line has the message id, the destination, the error
+code and the number of attempts. It never contains a sender or a body: use
+`GET /v1/messages/<id>` for details.
+
+The alert goes to the same bot and chat as the SMS messages. The Telegram sender filter does not
+apply to it. If Telegram is not configured, or `ALERTS_ENABLED=false`, the failed deliveries are
+marked as reported without sending anything, and turning alerts on later does not send a backlog.
+A temporary Telegram error is retried on the next run.
+
+## Rate limits
+
+Ingest and the read API are limited per `CF-Connecting-IP`: 120 requests per minute on `/v1/sms` and
+60 per minute on the read routes. The check runs after the configuration check and before the token
+is checked. A request over the limit gets
+`429 {"error":"rate_limited","message":"Too many requests"}` with `Retry-After: 60`, and
+sms-forwarder retries a 429. If the limiter itself fails, the request goes through. `/health` is not limited.
 
 ## Retention
 
 The cron deletes messages (and their deliveries) older than `RETENTION_DAYS`, at most 500 per run.
-`RETENTION_DAYS=0` keeps everything. Messages with a pending delivery are kept until the delivery ends.
+`RETENTION_DAYS=0` keeps everything. Messages with a pending delivery are kept until the delivery ends, and messages with a failed delivery
+are kept until its alert is sent, suppressed or given up.
 
 ## Known limits
 
 - Delivery is at-least-once. If a Worker dies in the middle of a send, the lease expires and the
-  cron sends again, so Telegram can rarely show a message twice. Deduplicate webhooks on `X-Delivery-Id`.
+  cron sends again, so Telegram can rarely show a duplicate part of a message. Deduplicate webhooks
+  on `X-Delivery-Id`.
+- An alert can be lost: if the Worker crashes after it claims the failed deliveries and before the
+  send is settled, or if giving the claim back fails after a temporary Telegram error (logged as
+  `alert.failed` with `error: internal`). The deliveries stay `failed` and readable in the API.
+- A permanent Telegram error (any 4xx other than 408, 425 or 429, or a 3xx) drops the alert. Only an
+  `alert.failed` log line records it.
+- Rate limits are per IP address and approximate, and they do not stop a flood spread over many
+  addresses.
 - The dedup key is deleted with the message. If the phone sends an SMS again after retention purged
   it, it is stored and forwarded again.
 - One owner per deployment. There is no multi-user or multi-tenant support.
-- Telegram text is cut at 4 096 characters (the stored message is complete).
 - The app's onboarding connection test shows "unreachable" while the server is not configured.
 - Only one webhook. Destinations are not editable at runtime.
-- No rate limiting beyond what Cloudflare provides by default. Ingest needs a token.
 - No UI. The read API is the only way to inspect stored messages.
 
 ## Development

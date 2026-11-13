@@ -25,6 +25,12 @@ it('never serializes keys outside the whitelist', () => {
   expect(line).not.toMatch(/sender|body|secret code|555123/);
 });
 
+it('logs the alert and read events with a count', () => {
+  const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  log('alert.sent', { count: 2 });
+  expect(spy.mock.calls[0]![0]).toBe('{"event":"alert.sent","count":2}');
+});
+
 it('keeps every whitelisted field', () => {
   const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
   const all = {

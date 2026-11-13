@@ -8,6 +8,7 @@ import {
   insertMessage,
   markDelivered,
   markFailed,
+  markPartSent,
   markRetry,
 } from '../../src/db/repo';
 
@@ -150,5 +151,30 @@ describe('mark*', () => {
     expect(await markFailed(env.DB, id!, stale + 1, 1, 'http_400', 400, 70_000)).toBe(false);
     expect(await row(id!)).toMatchObject({ status: 'pending', attempts: 2, lockedUntil: fresh.lockedUntil, lastError: null });
     expect(await markDelivered(env.DB, id!, fresh.lockedUntil!, 2, 200, 70_000)).toBe(true);
+  });
+});
+
+describe('markPartSent', () => {
+  it('markPartSent writes with the lease', async () => {
+    const [id] = await seed(['telegram'], 1000);
+    const c = await claimDelivery(env.DB, id!, 1000);
+    expect(await markPartSent(env.DB, id!, c!.lockedUntil!, 2, 2500)).toBe(true);
+    expect(await row(id!)).toMatchObject({ partsSent: 2, updatedAt: 2500 });
+  });
+
+  it('markPartSent with a stale lease changes nothing', async () => {
+    const [id] = await seed(['telegram'], 1000);
+    const c = await claimDelivery(env.DB, id!, 1000);
+    expect(await markPartSent(env.DB, id!, c!.lockedUntil! - 1, 2, 2500)).toBe(false);
+    expect((await row(id!)).partsSent).toBe(0);
+  });
+
+  it('markPartSent on a delivered row changes nothing', async () => {
+    const [id] = await seed(['telegram'], 1000);
+    const c = await claimDelivery(env.DB, id!, 1000);
+    const lease = c!.lockedUntil!;
+    await markDelivered(env.DB, id!, lease, 1, 200, 2000);
+    expect(await markPartSent(env.DB, id!, lease, 2, 2500)).toBe(false);
+    expect((await row(id!)).partsSent).toBe(0);
   });
 });

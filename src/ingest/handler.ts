@@ -4,6 +4,7 @@ import { insertMessage } from '../db/repo';
 import { selectDestinations } from '../destinations/filter';
 import { bearerToken, tokensEqual } from '../http/auth';
 import { errorResponse, type ErrorCode } from '../http/errors';
+import { isAllowed, rateLimitedResponse, type Limiter } from '../http/rate-limit';
 import { log } from '../log';
 import { dedupKey } from './identity';
 import { parseIngest } from './schema';
@@ -13,6 +14,7 @@ export const MAX_BODY_BYTES = 64 * 1024;
 export type IngestDeps = {
   now: () => number;
   onStored: (env: Env, ids: number[]) => Promise<void>;
+  limiters: (env: Env) => { ingest: Limiter };
 };
 
 type Rejection = { status: 400 | 401 | 503; code: ErrorCode; message: string };
@@ -53,8 +55,8 @@ async function readLimited(request: Request, limit: number): Promise<string | nu
 }
 
 /**
- * POST /v1/sms. Order: config → auth → size → JSON → schema → dedup → store. Only 200, 400, 401
- * and 503 come out of here; anything thrown becomes 500 in the app's error handler.
+ * POST /v1/sms. Order: config → rate limit → auth → size → JSON → schema → dedup → store. Only 200, 400, 401,
+ * 429 and 503 come out of here; anything thrown becomes 500 in the app's error handler.
  */
 export async function handleIngest(c: Context<{ Bindings: Env }>, deps: IngestDeps): Promise<Response> {
   const parsed = parseConfig(c.env as unknown as Record<string, unknown>);
@@ -65,6 +67,11 @@ export async function handleIngest(c: Context<{ Bindings: Env }>, deps: IngestDe
   const config = parsed.config;
   if (config.ingestToken === null) {
     return reject({ status: 503, code: 'not_configured', message: 'Ingest is not configured' });
+  }
+
+  if (!(await isAllowed(deps.limiters(c.env).ingest, 'ingest', c.req.raw))) {
+    log('ingest.rejected', { status: 429, error: 'rate_limited' });
+    return rateLimitedResponse();
   }
 
   const presented = bearerToken(c.req.header('Authorization'));
