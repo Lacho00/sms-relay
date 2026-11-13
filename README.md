@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/brand/logo-mark.svg" width="160" alt=""></p>
+
 # sms-relay
 
 [![CI](https://github.com/Lacho00/sms-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/Lacho00/sms-relay/actions/workflows/ci.yml)
