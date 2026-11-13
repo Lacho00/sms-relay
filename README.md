@@ -308,7 +308,8 @@ sms-forwarder retries a 429. If the limiter itself fails, the request goes throu
 ## Retention
 
 The cron deletes messages (and their deliveries) older than `RETENTION_DAYS`, at most 500 per run.
-`RETENTION_DAYS=0` keeps everything. Messages with a pending delivery are kept until the delivery ends.
+`RETENTION_DAYS=0` keeps everything. Messages with a pending delivery are kept until the delivery ends, and messages with a failed delivery
+are kept until its alert is sent, suppressed or given up.
 
 ## Known limits
 

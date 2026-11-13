@@ -67,8 +67,10 @@ describe('purgeExpired', () => {
     await env.DB.prepare("UPDATE deliveries SET status = 'delivered' WHERE message_id = ? AND destination = 'telegram'")
       .bind(done)
       .run();
-    await env.DB.prepare("UPDATE deliveries SET status = 'failed' WHERE message_id = ? AND destination = 'webhook'")
-      .bind(done)
+    await env.DB.prepare(
+      "UPDATE deliveries SET status = 'failed', alerted_at = ? WHERE message_id = ? AND destination = 'webhook'",
+    )
+      .bind(NOW - DAY, done)
       .run();
 
     expect(await purgeExpired(env.DB, 30, NOW)).toBe(1);
@@ -77,6 +79,18 @@ describe('purgeExpired', () => {
     expect((await getDeliveries(env.DB, pending)).length).toBe(2);
     expect(await getMessage(env.DB, done)).toBeNull();
     expect(await getDeliveries(env.DB, done)).toEqual([]);
+  });
+
+  it('keeps an expired message while a failed delivery is not yet alerted, and purges it once alerted', async () => {
+    const id = await store('unalerted', NOW - 40 * DAY, ['webhook']);
+    await env.DB.prepare("UPDATE deliveries SET status = 'failed' WHERE message_id = ?").bind(id).run();
+
+    expect(await purgeExpired(env.DB, 30, NOW)).toBe(0);
+    expect(await getMessage(env.DB, id)).not.toBeNull();
+
+    await env.DB.prepare('UPDATE deliveries SET alerted_at = ? WHERE message_id = ?').bind(NOW, id).run();
+    expect(await purgeExpired(env.DB, 30, NOW)).toBe(1);
+    expect(await getMessage(env.DB, id)).toBeNull();
   });
 
   it('keeps a message created exactly at the cutoff (the comparison is strict)', async () => {
