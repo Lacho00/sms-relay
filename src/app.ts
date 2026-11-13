@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { sendAlerts } from './alerts';
 import { parseConfig } from './config';
 import { errorBody } from './http/errors';
+import type { Limiter } from './http/rate-limit';
 import { handleIngest } from './ingest/handler';
 import { log } from './log';
 import { handleDetail, handleList } from './read/handler';
@@ -16,6 +17,8 @@ export type Runtime = {
 export type AppDeps = Runtime & {
   /** Runs after a new message is stored, through `waitUntil`, with its new delivery ids. */
   onStored: (env: Env, ids: number[]) => Promise<void>;
+  /** The per-IP limiters for the ingest and read route families. */
+  limiters: (env: Env) => { ingest: Limiter; read: Limiter };
 };
 
 function resolveRuntime(deps: Partial<Runtime>): Runtime {
@@ -37,7 +40,9 @@ export function createApp(deps: Partial<AppDeps> = {}): Hono<{ Bindings: Env }> 
   const resolved: AppDeps = {
     ...runtime,
     onStored: (env, ids) => withOutbox(env, runtime, (d) => processDeliveries(d, ids)),
+    limiters: (env) => ({ ingest: env.INGEST_LIMITER, read: env.READ_LIMITER }),
     ...(deps.onStored ? { onStored: deps.onStored } : {}),
+    ...(deps.limiters ? { limiters: deps.limiters } : {}),
   };
 
   const app = new Hono<{ Bindings: Env }>();
@@ -46,8 +51,8 @@ export function createApp(deps: Partial<AppDeps> = {}): Hono<{ Bindings: Env }> 
 
   app.post('/v1/sms', (c) => handleIngest(c, resolved));
 
-  app.get('/v1/messages', handleList);
-  app.get('/v1/messages/:id', handleDetail);
+  app.get('/v1/messages', (c) => handleList(c, resolved));
+  app.get('/v1/messages/:id', (c) => handleDetail(c, resolved));
 
   app.notFound((c) => c.json(errorBody('not_found', 'Not found'), 404));
 

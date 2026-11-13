@@ -9,6 +9,8 @@ const NOW = Date.UTC(2026, 10, 9, 12, 0, 0);
 const URL_ = 'https://relay.test/v1/sms';
 const ALLOWED_STATUSES = [200, 400, 401, 503];
 
+const ALLOW = { ingest: { limit: async () => ({ success: true }) }, read: { limit: async () => ({ success: true }) } };
+
 type Overrides = Record<string, unknown>;
 
 const testEnv = (overrides: Overrides = {}): Env => ({ ...env, ...overrides }) as unknown as Env;
@@ -42,7 +44,7 @@ async function call(opts: CallOptions = {}) {
   if (opts.body instanceof ReadableStream) init.duplex = 'half';
   const req = new Request(URL_, init);
   const onStored = vi.fn(async (_env: Env, _ids: number[]) => {});
-  const app = createApp({ now: () => NOW, onStored, ...opts.deps });
+  const app = createApp({ now: () => NOW, onStored, limiters: () => ALLOW, ...opts.deps });
   const ctx = createExecutionContext();
   const res = await app.fetch(req, opts.env ?? testEnv(), ctx);
   await waitOnExecutionContext(ctx);
@@ -319,5 +321,57 @@ describe('POST /v1/sms — failures and logging', () => {
     const lines = spy.mock.calls.map((c) => JSON.parse(String(c[0])));
     spy.mockRestore();
     expect(lines).toEqual([{ event: 'ingest.rejected', status: 400, error: 'invalid_json' }]);
+  });
+});
+
+describe('rate limit', () => {
+  const deny = { limit: vi.fn(async (_o: { key: string }) => ({ success: false })) };
+  const denyDeps = (): Partial<AppDeps> => ({ limiters: () => ({ ingest: deny, read: deny }) });
+
+  afterEach(() => deny.limit.mockClear());
+
+  it('over the limit returns 429 and stores nothing', async () => {
+    const spy = vi.spyOn(console, 'log');
+    const before = await env.DB.prepare('SELECT COUNT(*) AS n FROM messages').first<{ n: number }>();
+    const r = await call({ body: JSON.stringify(payload()), deps: denyDeps(), headers: { 'CF-Connecting-IP': '203.0.113.7' } });
+    expect(r.status).toBe(429);
+    expect(r.res.headers.get('Retry-After')).toBe('60');
+    expect(r.json.error).toBe('rate_limited');
+    expect(deny.limit).toHaveBeenCalledWith({ key: 'ingest:203.0.113.7' });
+    const after = await env.DB.prepare('SELECT COUNT(*) AS n FROM messages').first<{ n: number }>();
+    expect(after?.n).toBe(before?.n);
+    expect(r.onStored).not.toHaveBeenCalled();
+    const lines = spy.mock.calls.map((c) => JSON.parse(c[0] as string));
+    expect(lines).toContainEqual({ event: 'ingest.rejected', status: 429, error: 'rate_limited' });
+    expect(JSON.stringify(lines)).not.toContain('203.0.113.7');
+  });
+
+  it('the limit runs before auth', async () => {
+    const r = await call({ auth: 'Bearer wrong', deps: denyDeps() });
+    expect(r.status).toBe(429);
+  });
+
+  it('the limit beats validation', async () => {
+    for (const body of ['{}', 'not json']) {
+      expect((await call({ body, deps: denyDeps() })).status).toBe(429);
+    }
+  });
+
+  it('an unconfigured Worker still answers 503', async () => {
+    const r = await call({ env: testEnv({ INGEST_TOKEN: undefined }), deps: denyDeps() });
+    expect(r.status).toBe(503);
+    expect(deny.limit).not.toHaveBeenCalled();
+  });
+
+  it('a limiter outage lets ingest through', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const throwing = {
+      limit: async () => {
+        throw new Error('down');
+      },
+    };
+    const r = await call({ body: JSON.stringify(payload()), deps: { limiters: () => ({ ingest: throwing, read: throwing }) } });
+    expect(r.status).toBe(200);
+    expect(r.json.status).toBe('stored');
   });
 });
